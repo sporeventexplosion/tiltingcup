@@ -157,6 +157,18 @@ static uint64_t mem_read_8b_aligned(uint64_t addr) {
   assert(false);
 }
 
+static uint32_t mem_write_4b_aligned(uint64_t addr, uint32_t data) {
+  assert(addr % 4 == 0);
+
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr + 3) {
+      uint64_t offset = (addr - entry.start) / 4;
+      ((uint32_t *)entry.ptr)[offset] = data;
+    }
+  }
+  assert(false);
+}
+
 static uint32_t fetch_insn(uint64_t addr) {
   assert(addr % 2 == 0);
   for (auto &entry : memory_map) {
@@ -295,6 +307,8 @@ void step() {
   bool do_jump = false;
   uint64_t jump_pc;
 
+  bool amo = false;
+
   switch (opc) {
   case 0b00000:
     do_load = true;
@@ -324,6 +338,15 @@ void step() {
     result = pc + imm20_u;
     break;
 
+  case 0b01011:
+    // atomic ops
+    if (funct3 == 0b010) {
+      amo = true;
+    } else {
+      todo = true;
+    }
+    break;
+
   case 0b01100: {
     if (funct7 & 0b1011111) {
       todo = true;
@@ -345,10 +368,16 @@ void step() {
     // branch instructions
     rd = 0;
     jump_pc = pc + imm12_b_sext64;
-    if (funct3 == 0b000) {
+    switch (funct3) {
+    case 0b000:
       // beq
       do_jump = src1 == src2;
-    } else {
+      break;
+    case 0b001:
+      // bne
+      do_jump = src1 != src2;
+      break;
+    default:
       todo = true;
     }
     break;
@@ -410,6 +439,37 @@ void step() {
   }
 
   // memory
+  if (amo) {
+    // do the alu operation here
+    // TODO: actually look at the acquire and release fields
+    // TODO: handle sizes other than 32 bits
+    assert(funct3 == 0b010);
+
+    if ((funct7 & 0xc) == 0) {
+      if (src1 % 4 != 0) {
+        uint32_t result_32bit = mem_read_4b_aligned(src1);
+        result = (int32_t)result_32bit;
+
+        uint32_t after = 0;
+        uint8_t amofunct = funct7 >> 4;
+        switch (amofunct) {
+        case 0b000:
+          // amoadd
+          after = result_32bit + src2;
+          break;
+        default:
+          todo = 1;
+        }
+
+        mem_write_4b_aligned(src1, after);
+      } else {
+        // TODO: error out on misaligned atomics
+        todo = true;
+      }
+    } else {
+      todo = true;
+    }
+  }
   if (do_load) {
     result = mem_read_8b_aligned(addr);
   }
