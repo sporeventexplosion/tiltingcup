@@ -10,12 +10,12 @@
 #include <vector>
 
 const char *reg_names[32] = {
-    "zero (x0)", "ra (x1)",  "sp (x2)",   "gp (x3)",   "tp (x4)",  "t0 (x5)",
-    "t1 (x6)",   "t2 (x7)",  "s0 (x8)",   "s1 (x9)",   "a0 (x10)", "a1 (x11)",
-    "a2 (x12)",  "a3 (x13)", "a4 (x14)",  "a5 (x15)",  "a6 (x16)", "a7 (x17)",
-    "s2 (x18)",  "s3 (x19)", "s4 (x20)",  "s5 (x21)",  "s6 (x22)", "s7 (x23)",
-    "s8 (x24)",  "s9 (x25)", "s10 (x26)", "s11 (x27)", "t3 (x28)", "t4 (x29)",
-    "t5 (x30)",  "t6 (x31)",
+    "zero  (x0)", "ra  (x1)", "sp  (x2)",  "gp  (x3)",  "tp  (x4)", "t0  (x5)",
+    "t1  (x6)",   "t2  (x7)", "s0  (x8)",  "s1  (x9)",  "a0 (x10)", "a1 (x11)",
+    "a2 (x12)",   "a3 (x13)", "a4 (x14)",  "a5 (x15)",  "a6 (x16)", "a7 (x17)",
+    "s2 (x18)",   "s3 (x19)", "s4 (x20)",  "s5 (x21)",  "s6 (x22)", "s7 (x23)",
+    "s8 (x24)",   "s9 (x25)", "s10 (x26)", "s11 (x27)", "t3 (x28)", "t4 (x29)",
+    "t5 (x30)",   "t6 (x31)",
 };
 
 const uint32_t reset_vec[10] = {
@@ -170,6 +170,19 @@ static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
   assert(false);
 }
 
+static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
+  assert(addr % 8 == 0);
+
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr + 7) {
+      uint64_t offset = (addr - entry.start) / 8;
+      ((uint32_t *)entry.ptr)[offset] = data;
+      return;
+    }
+  }
+  assert(false);
+}
+
 static uint32_t fetch_insn(uint64_t addr) {
   assert(addr % 2 == 0);
   for (auto &entry : memory_map) {
@@ -305,6 +318,8 @@ void step() {
   uint16_t imm12_i_raw = op >> 20;
   uint64_t imm12_i_sext64 =
       compressed ? (use_cimm5 ? cimm5_sext64 : 0) : (int32_t)op >> 20;
+  uint64_t imm12_s_sext64 =
+      (int32_t)(((int32_t)(op & 0xfe000000u) >> 20) | ((op & 0xf80) >> 7));
 
   // always a multiple of two
   uint64_t imm12_b_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
@@ -319,6 +334,7 @@ void step() {
   uint64_t result;
 
   bool do_load = false;
+  bool do_store = false;
   uint64_t addr;
 
   bool do_jump = false;
@@ -353,6 +369,18 @@ void step() {
   case 0b00101:
     // auipc
     result = pc + imm20_u;
+    break;
+
+  case 0b01000:
+    do_store = true;
+    switch (funct3) {
+    case 0b011:
+      // sd
+      addr = src1 + imm12_s_sext64;
+      break;
+    default:
+      todo = true;
+    }
     break;
 
   case 0b01011:
@@ -449,13 +477,19 @@ void step() {
     fprintf(stderr, "Register state:\n");
     for (int i = 0; i < 32; i++) {
       uint64_t reg = hart.regfile[i];
-      fprintf(stderr, "    %-12s0x%016lx  %ld\n", reg_names[i], reg, reg);
+      fprintf(stderr, "    %10s  0x%016lx  %ld\n", reg_names[i], reg, reg);
     }
   }
   assert(!todo);
 
   // memory
-  if (amo) {
+  if (do_load) {
+    // TODO: different sizes
+    result = mem_read_8b_aligned(addr);
+  } else if (do_store) {
+    // TODO: different sizes
+    mem_write_8b_aligned(addr, src2);
+  } else if (amo) {
     // do the alu operation here
     // TODO: actually look at the acquire and release fields
     // TODO: handle sizes other than 32 bits
@@ -485,9 +519,6 @@ void step() {
     } else {
       todo = true;
     }
-  }
-  if (do_load) {
-    result = mem_read_8b_aligned(addr);
   }
 
   // reg write
