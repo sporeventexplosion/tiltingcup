@@ -191,12 +191,6 @@ struct Hart {
 
 Hart hart = {};
 
-static int32_t decode_imm20_j_as_i32(uint32_t op) {
-  int32_t ret = (int32_t)(op & 0x80000000u) >> 11;
-  ret |= ((op & 0x7fe00000u) >> 20) | ((op & 0x100000) >> 9) | (op & 0xff000);
-  return ret;
-}
-
 void step() {
   bool todo = false;
 
@@ -279,8 +273,14 @@ void step() {
   uint16_t imm12_i_raw = op >> 20;
   uint64_t imm12_i_sext64 =
       compressed ? (use_cimm5 ? cimm5_sext64 : 0) : (int32_t)op >> 20;
-  // already a multiple of two
-  uint64_t imm20_j = decode_imm20_j_as_i32(op);
+
+  // these are always a multiple of two
+  uint64_t imm20_j_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 11) |
+                                      ((op & 0x7fe00000u) >> 20) |
+                                      ((op & 0x100000) >> 9) | (op & 0xff000));
+  uint64_t imm12_b_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
+                                      ((op & 0x7e000000u) >> 20) |
+                                      ((op & 0xf00) >> 7) | ((op & 0x80) << 4));
 
   // execute
   uint64_t pc = hart.pc;
@@ -341,9 +341,21 @@ void step() {
     break;
   }
 
-  case 0b11001:
-    // jalr
+  case 0b11000:
+    // branch instructions
+    rd = 0;
+    jump_pc = pc + imm12_b_sext64;
     if (funct3 == 0b000) {
+      // beq
+      do_jump = src1 == src2;
+    } else {
+      todo = true;
+    }
+    break;
+
+  case 0b11001:
+    if (funct3 == 0b000) {
+      // jalr
       do_jump = true;
       jump_pc = (src1 + imm12_i_sext64) & -0x2;
       result = next_pc;
@@ -355,7 +367,7 @@ void step() {
   case 0b11011:
     // jal
     do_jump = true;
-    jump_pc = pc + imm20_j;
+    jump_pc = pc + imm20_j_sext64;
     result = next_pc;
     break;
 
