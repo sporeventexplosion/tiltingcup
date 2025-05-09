@@ -2,4 +2,4 @@
 
 set -ex
 
-clang++ -std=c++23 -Og -Wall -Wextra -pedantic -o tcup tcup.cc
+clang++ -std=c++23 -g -Og -Wall -Wextra -pedantic -o tcup tcup.cc
