@@ -157,13 +157,14 @@ static uint64_t mem_read_8b_aligned(uint64_t addr) {
   assert(false);
 }
 
-static uint32_t mem_write_4b_aligned(uint64_t addr, uint32_t data) {
+static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
   assert(addr % 4 == 0);
 
   for (auto &entry : memory_map) {
     if (entry.start <= addr && entry.start + entry.size > addr + 3) {
       uint64_t offset = (addr - entry.start) / 4;
       ((uint32_t *)entry.ptr)[offset] = data;
+      return;
     }
   }
   assert(false);
@@ -450,9 +451,8 @@ void step() {
       uint64_t reg = hart.regfile[i];
       fprintf(stderr, "    %-12s0x%016lx  %ld\n", reg_names[i], reg, reg);
     }
-
-    assert(false);
   }
+  assert(!todo);
 
   // memory
   if (amo) {
@@ -462,7 +462,7 @@ void step() {
     assert(funct3 == 0b010);
 
     if ((funct7 & 0xc) == 0) {
-      if (src1 % 4 != 0) {
+      if (src1 % 4 == 0) {
         uint32_t result_32bit = mem_read_4b_aligned(src1);
         result = (int32_t)result_32bit;
 
@@ -474,7 +474,7 @@ void step() {
           after = result_32bit + src2;
           break;
         default:
-          todo = 1;
+          todo = true;
         }
 
         mem_write_4b_aligned(src1, after);
