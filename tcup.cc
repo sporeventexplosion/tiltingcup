@@ -141,6 +141,12 @@ struct Hart {
 
 Hart hart = {};
 
+static int32_t decode_imm20_j_as_i32(uint32_t op) {
+  int32_t ret = (int32_t)(op & 0x80000000u) >> 11;
+  ret |= ((op & 0x7fe00000u) >> 20) | ((op & 0x100000) >> 9) | (op & 0xff000);
+  return ret;
+}
+
 void step() {
   bool todo = false;
 
@@ -153,17 +159,22 @@ void step() {
 
   uint8_t opc = (op >> 2) & 0x1f;
   uint8_t funct3 = (op >> 12) & 0x7;
+  uint8_t funct7 = op >> 25;
   uint8_t rd = (op >> 7) & 0x1f;
   uint8_t rs1 = (op >> 15) & 0x1f;
+  uint8_t rs2 = (op >> 20) & 0x1f;
 
-  uint32_t imm20_upper = op & -0x1000;
-  uint64_t imm12_i = op >> 20;
+  uint32_t imm20_u = op & -0x1000;
+  uint16_t imm12_i = op >> 20;
   uint64_t imm12_i_sext64 = (int32_t)op >> 20;
+  // already a multiple of two
+  uint64_t imm20_j = decode_imm20_j_as_i32(op);
 
   // execute
   uint64_t pc = hart.pc;
   uint64_t next_pc = pc + 4;
   uint64_t src1 = hart.regfile[rs1];
+  uint64_t src2 = hart.regfile[rs2];
   uint64_t result;
 
   bool do_load = false;
@@ -195,8 +206,25 @@ void step() {
     break;
 
   case 0b00101: // auipc
-    result = pc + imm20_upper;
+    result = pc + imm20_u;
     break;
+
+  case 0b01100: {
+    if (funct7 & 0b1011111) {
+      todo = true;
+      break;
+    }
+
+    bool is_alt_func = funct7 == 0b0100000;
+    switch (funct3) {
+    case 0b000:
+      result = is_alt_func ? src1 - src2 : src1 + src2;
+      break;
+    default:
+      todo = true;
+    }
+    break;
+  }
 
   case 0b11001: // jalr
     if (funct3 == 0b000) {
@@ -206,6 +234,12 @@ void step() {
     } else {
       todo = true;
     }
+    break;
+
+  case 0b11011: // jal
+    do_jump = true;
+    jump_pc = pc + imm20_j;
+    result = next_pc;
     break;
 
   case 0b11100:
@@ -229,7 +263,7 @@ void step() {
   }
 
   if (todo) {
-    fprintf(stderr, "pc = %lx, op = %08x\n", hart.pc, op);
+    fprintf(stderr, "TODO: pc = %lx, op = %08x\n", hart.pc, op);
     assert(false);
   }
 
