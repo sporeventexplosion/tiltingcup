@@ -221,6 +221,7 @@ void step() {
 
   bool use_cimm5 = false;
 
+  uint64_t imm20_j_sext64 = 0;
   uint64_t cimm5_sext64;
   if (compressed) {
     // expand compressed instructions
@@ -229,7 +230,7 @@ void step() {
     bool cbit12 = op & 0x1000;
     uint8_t crds1 = (op >> 7) & 0x1f;
     uint8_t crs2 = (op >> 2) & 0x1f;
-    cimm5_sext64 = -((int64_t)(op >> 7) & 0x20) | ((op >> 2) & 0x1f);
+    cimm5_sext64 = -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
 
     if (cmap == 0b00) {
       todo = true;
@@ -242,6 +243,19 @@ void step() {
         funct3 = 0b000;
         rd = crds1;
         rs1 = 0;
+        break;
+      case 0b101:
+        // c.j, expands to jal x0, offset
+        //  12 |  11 |  10 |   9 |   8 |   7 |   6 |   5 |   4 |   3 |   2
+        //  11 |   4 |   9 |   8 |  10 |   6 |   7 |   3 |   2 |   1 |   5
+
+        // always a multiple of two
+        opc = 0b11011;
+        rd = 0;
+        imm20_j_sext64 = -((int64_t)(op & 0x1000) >> 1) | ((op & 0x800) >> 7) |
+                         ((op & 0x600) >> 1) | ((op & 0x100) << 2) |
+                         ((op & 0x80) >> 1) | ((op & 0x40) << 1) |
+                         ((op & 0x38) >> 2) | ((op & 0x4) << 3);
         break;
       default:
         todo = true;
@@ -279,6 +293,11 @@ void step() {
     rd = (op >> 7) & 0x1f;
     rs1 = (op >> 15) & 0x1f;
     rs2 = (op >> 20) & 0x1f;
+
+    // always a multiple of two
+    imm20_j_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 11) |
+                               ((op & 0x7fe00000u) >> 20) |
+                               ((op & 0x100000) >> 9) | (op & 0xff000));
   }
 
   uint32_t imm20_u = op & -0x1000;
@@ -286,10 +305,7 @@ void step() {
   uint64_t imm12_i_sext64 =
       compressed ? (use_cimm5 ? cimm5_sext64 : 0) : (int32_t)op >> 20;
 
-  // these are always a multiple of two
-  uint64_t imm20_j_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 11) |
-                                      ((op & 0x7fe00000u) >> 20) |
-                                      ((op & 0x100000) >> 9) | (op & 0xff000));
+  // always a multiple of two
   uint64_t imm12_b_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
                                       ((op & 0x7e000000u) >> 20) |
                                       ((op & 0xf00) >> 7) | ((op & 0x80) << 4));
