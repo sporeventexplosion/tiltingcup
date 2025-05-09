@@ -250,8 +250,16 @@ void step() {
       todo = true;
     } else if (cmap == 0b01) {
       switch (cfunct3) {
+      case 0b000:
+        // c.addi, expands to addi rd, rd, imm
+        use_cimm5 = true;
+        opc = 0b00100;
+        funct3 = 0b000;
+        rd = crds1;
+        rs1 = crds1;
+        break;
       case 0b010:
-        // c.li, expands to addi, rd, x0, imm
+        // c.li, expands to addi rd, x0, imm
         use_cimm5 = true;
         opc = 0b00100;
         funct3 = 0b000;
@@ -278,7 +286,18 @@ void step() {
       switch (cfunct3) {
       case 0b100:
         if (cbit12) {
-          todo = true;
+          if (crs2 == 0) {
+            // TODO: jalr, ebreak
+            todo = true;
+          } else {
+            // c.add, expands to add rd, rd, rs2
+            opc = 0b01100;
+            funct3 = 0b000;
+            funct7 = 0b0000000;
+            rd = crds1;
+            rs1 = crds1;
+            rs2 = crs2;
+          }
         } else {
           if (crs2 == 0) {
             if (crds1 == 0) {
@@ -344,6 +363,7 @@ void step() {
 
   switch (opc) {
   case 0b00000:
+    // loads
     do_load = true;
     switch (funct3) {
     case 0b011:
@@ -355,11 +375,44 @@ void step() {
     }
     break;
 
+  case 0b00011:
+    // TODO: some day this might not be a noop
+    if (funct3 == 0b000) {
+      // fence
+      rd = 0;
+    } else if (funct3 == 0b001) {
+      // fence.i
+      rd = 0;
+    } else {
+      todo = true;
+    }
+    break;
+
   case 0b00100:
     switch (funct3) {
     case 0b000:
       // addi
       result = src1 + imm12_i_sext64;
+      break;
+    case 0b010:
+      // slti
+      result = (int64_t)src1 < (int64_t)imm12_i_sext64 ? 1 : 0;
+      break;
+    case 0b011:
+      // sltiu
+      result = src1 < imm12_i_sext64 ? 1 : 0;
+      break;
+    case 0b100:
+      // xori
+      result = src1 ^ imm12_i_sext64;
+      break;
+    case 0b110:
+      // ori
+      result = src1 | imm12_i_sext64;
+      break;
+    case 0b111:
+      // andi
+      result = src1 & imm12_i_sext64;
       break;
     default:
       todo = true;
@@ -372,6 +425,7 @@ void step() {
     break;
 
   case 0b01000:
+    // stores
     do_store = true;
     switch (funct3) {
     case 0b011:
@@ -401,7 +455,39 @@ void step() {
     bool is_alt_func = funct7 == 0b0100000;
     switch (funct3) {
     case 0b000:
+      // add
+      // sub
       result = is_alt_func ? src1 - src2 : src1 + src2;
+      break;
+    case 0b010:
+      if (is_alt_func)
+        todo = true;
+      // slt
+      result = (int64_t)src1 < (int64_t)src2 ? 1 : 0;
+      break;
+    case 0b011:
+      if (is_alt_func)
+        todo = true;
+      // sltu
+      result = src1 < src2 ? 1 : 0;
+      break;
+    case 0b100:
+      if (is_alt_func)
+        todo = true;
+      // xor
+      result = src1 ^ src2;
+      break;
+    case 0b110:
+      if (is_alt_func)
+        todo = true;
+      // or
+      result = src1 | src2;
+      break;
+    case 0b111:
+      if (is_alt_func)
+        todo = true;
+      // and
+      result = src1 & src2;
       break;
     default:
       todo = true;
@@ -421,6 +507,22 @@ void step() {
     case 0b001:
       // bne
       do_jump = src1 != src2;
+      break;
+    case 0b100:
+      // blt
+      do_jump = (int64_t)src1 < (int64_t)src2;
+      break;
+    case 0b101:
+      // bge
+      do_jump = (int64_t)src1 >= (int64_t)src2;
+      break;
+    case 0b110:
+      // bltu
+      do_jump = src1 < src2;
+      break;
+    case 0b111:
+      // bgeu
+      do_jump = src1 >= src2;
       break;
     default:
       todo = true;
