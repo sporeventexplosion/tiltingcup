@@ -26,6 +26,7 @@ struct Hart {
 
 Hart hart = {};
 
+static bool todo = false;
 static uint64_t n_retired = 0;
 
 const static size_t dbg_event_buf_cap = 4096;
@@ -134,14 +135,14 @@ void dbg_log_memory(int event, uint64_t addr, uint64_t attrs, uint64_t data) {
 
 const char *reg_names[32] = {
     "zero  (x0)", "ra  (x1)", "sp  (x2)",  "gp  (x3)",  "tp  (x4)", "t0  (x5)",
-    "t1  (x6)",   "t2  (x7)", "s0  (x8)",  "s1  (x9)",  "a0 (x10)", "a1 (x11)",
+    "t1  (x6)",   "t2  (x7)", "fp  (x8)",  "s1  (x9)",  "a0 (x10)", "a1 (x11)",
     "a2 (x12)",   "a3 (x13)", "a4 (x14)",  "a5 (x15)",  "a6 (x16)", "a7 (x17)",
     "s2 (x18)",   "s3 (x19)", "s4 (x20)",  "s5 (x21)",  "s6 (x22)", "s7 (x23)",
     "s8 (x24)",   "s9 (x25)", "s10 (x26)", "s11 (x27)", "t3 (x28)", "t4 (x29)",
     "t5 (x30)",   "t6 (x31)",
 };
 
-const uint32_t reset_vec[10] = {
+uint32_t reset_vec[10] = {
     0x00000297,
     0x02828613,
     0xf1402573,
@@ -153,8 +154,8 @@ const uint32_t reset_vec[10] = {
     // start addr
     0x80000000,
     0,
-    // fdt addr
-    0xbfe00000,
+    // fdt addr, filled in by main()
+    0,
     0,
 };
 
@@ -251,7 +252,8 @@ static uint8_t mem_read_1b(uint64_t addr) {
       return ((uint8_t *)entry.ptr)[offset];
     }
   }
-  assert(false);
+  todo = true;
+  return -1;
 }
 
 static uint16_t mem_read_2b_aligned(uint64_t addr) {
@@ -263,7 +265,8 @@ static uint16_t mem_read_2b_aligned(uint64_t addr) {
       return ((uint16_t *)entry.ptr)[offset];
     }
   }
-  assert(false);
+  todo = true;
+  return -1;
 }
 
 static uint32_t mem_read_4b_aligned(uint64_t addr) {
@@ -275,7 +278,8 @@ static uint32_t mem_read_4b_aligned(uint64_t addr) {
       return ((uint32_t *)entry.ptr)[offset];
     }
   }
-  assert(false);
+  todo = true;
+  return -1;
 }
 
 static uint64_t mem_read_8b_aligned(uint64_t addr) {
@@ -287,7 +291,8 @@ static uint64_t mem_read_8b_aligned(uint64_t addr) {
       return ((uint64_t *)entry.ptr)[offset];
     }
   }
-  assert(false);
+  todo = true;
+  return -1;
 }
 
 static void mem_write_1b(uint64_t addr, uint8_t data) {
@@ -298,7 +303,7 @@ static void mem_write_1b(uint64_t addr, uint8_t data) {
       return;
     }
   }
-  assert(false);
+  todo = true;
 }
 
 static void mem_write_2b_aligned(uint64_t addr, uint16_t data) {
@@ -311,7 +316,7 @@ static void mem_write_2b_aligned(uint64_t addr, uint16_t data) {
       return;
     }
   }
-  assert(false);
+  todo = true;
 }
 
 static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
@@ -324,7 +329,7 @@ static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
       return;
     }
   }
-  assert(false);
+  todo = true;
 }
 
 static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
@@ -333,11 +338,11 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
   for (auto &entry : memory_map) {
     if (entry.start <= addr && entry.start + entry.size > addr + 7) {
       uint64_t offset = (addr - entry.start) / 8;
-      ((uint32_t *)entry.ptr)[offset] = data;
+      ((uint64_t *)entry.ptr)[offset] = data;
       return;
     }
   }
-  assert(false);
+  todo = true;
 }
 
 static uint32_t fetch_insn(uint64_t addr) {
@@ -364,7 +369,9 @@ static uint32_t fetch_insn(uint64_t addr) {
       }
     }
   }
-  assert(false);
+  fprintf(stderr, "Instruction fetch failed for address %lx\n", addr);
+  todo = true;
+  return 0;
 }
 
 uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
@@ -379,18 +386,18 @@ uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
     // csrrc:
     return old & ~next;
   default:
-    assert(false);
+    todo = true;
+    return -1;
   }
 }
 
 void step() {
-  bool todo = false;
-
   // fetch
   uint32_t op = fetch_insn(hart.pc);
 
   // decode
-  bool compressed = (op & 3) != 3;
+  uint8_t quad = op & 3;
+  bool compressed = quad != 3;
 
   uint8_t opc = 0;
   uint8_t funct3 = 0;
@@ -402,7 +409,6 @@ void step() {
   uint64_t cimm64 = 0;
   if (compressed) {
     // expand compressed instructions
-    uint8_t cmap = op & 3;
     uint8_t cfunct3 = (op >> 13) & 0x7;
     bool cbit12 = op & 0x1000;
     uint8_t crds1 = (op >> 7) & 0x1f;
@@ -412,9 +418,11 @@ void step() {
 
     cimm64 = 0;
 
-    if (cmap == 0b00) {
-      // Map 0b00
+    if (quad == 0) {
+      // Quadrant 0
 
+      uint64_t cimm5_lsw_zext64 =
+          ((op & 0x1c00) >> 7) | ((op & 0x40) >> 4) | ((op & 0x20) << 1);
       uint64_t cimm5_lsd_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x60) << 1);
 
       switch (cfunct3) {
@@ -430,16 +438,38 @@ void step() {
                  ((op & 0x40) >> 4) | ((op & 0x20) >> 2);
 
         if (cimm64 == 0) {
-          // all-zeros instruction
+          // reserved, possibly the all-zeros instruction
           todo = true;
         }
         break;
 
+      case 0b010:
+        // c.lw, expands to lw rd', offset(rs1′)
+        opc = 0b00000;
+        funct3 = 0b010;
+        rd = crds2p;
+        rs1 = crds1p;
+        cimm64 = cimm5_lsw_zext64;
+        break;
+      case 0b011:
+        // c.ld, expands to ld rd', offset(rs1′)
+        opc = 0b00000;
+        funct3 = 0b011;
+        rd = crds2p;
+        rs1 = crds1p;
+        cimm64 = cimm5_lsd_zext64;
+        break;
+
+      case 0b110:
+        // c.sw, expands to sw rs2′, offset(rs1′)
+        opc = 0b01000;
+        funct3 = 0b010;
+        rs1 = crds1p;
+        rs2 = crds2p;
+        cimm64 = cimm5_lsw_zext64;
+        break;
       case 0b111:
         // c.sd, expands to sd rs2′, offset(rs1′)
-        // TODO: verify this works
-        todo = true;
-
         opc = 0b01000;
         funct3 = 0b011;
         rs1 = crds1p;
@@ -449,8 +479,8 @@ void step() {
       default:
         todo = true;
       }
-    } else if (cmap == 0b01) {
-      // Map 0b01
+    } else if (quad == 1) {
+      // Quadrant 1
 
       uint64_t cimm6_sext64 =
           -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
@@ -504,6 +534,66 @@ void step() {
           todo = true;
         }
         break;
+      case 0b100: {
+        uint8_t csubop_1 = crds1 >> 3;
+        rd = crds1p;
+        rs1 = crds1p;
+        rs2 = crds2p;
+        if ((csubop_1 & 2) == 0b00) {
+          // c.srli/c.srai, expands to srli/srai rd, rd, imm
+          opc = 0b00100;
+          funct3 = 0b101;
+          cimm64 = ((csubop_1 & 1) << 10) | (cimm6_sext64 & 0x3f);
+        } else if (csubop_1 == 0b10) {
+          // c.andi, expands to andi rd, rd, imm
+          opc = 0b00100;
+          funct3 = 0b111;
+          cimm64 = cimm6_sext64;
+        } else {
+          uint8_t csubop_2 = ((op & 0x1000) >> 10) | (crs2 >> 3);
+          switch (csubop_2) {
+          case 0b000:
+            // c.sub, expands to sub rd, rd, rs2
+            opc = 0b01100;
+            funct3 = 0b000;
+            funct7 = 0b0100000;
+            break;
+          case 0b001:
+            // c.xor, expands to xor rd, rd, rs2
+            opc = 0b01100;
+            funct3 = 0b100;
+            funct7 = 0b0000000;
+            break;
+          case 0b010:
+            // c.or, expands to or rd, rd, rs2
+            opc = 0b01100;
+            funct3 = 0b110;
+            funct7 = 0b0000000;
+            break;
+          case 0b011:
+            // c.and, expands to and rd, rd, rs2
+            opc = 0b01100;
+            funct3 = 0b111;
+            funct7 = 0b0000000;
+            break;
+          case 0b100:
+            // c.subw, expands to subw rd, rd, rs2
+            opc = 0b01110;
+            funct3 = 0b000;
+            funct7 = 0b0100000;
+            break;
+          case 0b101:
+            // c.addw, expands to addw rd, rd, rs2
+            opc = 0b01110;
+            funct3 = 0b000;
+            funct7 = 0b0000000;
+            break;
+          default:
+            todo = true;
+          }
+        }
+        break;
+      }
       case 0b101:
         // c.j, expands to jal x0, offset
         //  12 |  11 |  10 |   9 |   8 |   7 |   6 |   5 |   4 |   3 |   2
@@ -533,32 +623,63 @@ void step() {
       default:
         todo = true;
       }
-    } else if (cmap == 0b10) {
-      // Map 0b10
-
-      uint64_t cimm6_ldsp_zext64 =
-          ((op & 0x1c00) >> 7) | ((op & 0x20) >> 2) | ((op & 0x1c) << 4);
-      uint64_t cimm6_sdsp_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
+    } else if (quad == 2) {
+      // Quadrant 2
 
       switch (cfunct3) {
+      case 0b000:
+        // c.slli, expands to slli rd, rd, imm
+        opc = 0b00100;
+        funct3 = 0b001;
+        rd = crds1;
+        rs1 = crds1;
+        cimm64 = ((op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
+        break;
+      case 0b010:
+        if (crds1 == 0) {
+          // reserved
+          todo = true;
+        } else {
+          // c.lwsp, expands to lw rd, offset(x2)
+          opc = 0b00000;
+          funct3 = 0b010;
+          rd = crds1;
+          rs1 = 2;
+          cimm64 =
+              ((op & 0x1000) >> 7) | ((op & 0x70) >> 2) | ((op & 0xc) << 4);
+        }
+        break;
       case 0b011:
         if (crds1 == 0) {
           // reserved
           todo = true;
         } else {
-          // c.slsp, expands to ld rd, offset(x2)
+          // c.ldsp, expands to ld rd, offset(x2)
           opc = 0b00000;
           funct3 = 0b011;
           rd = crds1;
           rs1 = 2;
-          cimm64 = cimm6_ldsp_zext64;
+          cimm64 =
+              ((op & 0x1000) >> 7) | ((op & 0x60) >> 2) | ((op & 0x1c) << 4);
+          // fprintf(stderr, "c.ldsp: pc = %lx, rd = %u, rs1 = %u, cimm64 =
+          // %ld\n", hart.pc, rd, rs1, cimm64);
         }
         break;
       case 0b100:
         if (cbit12) {
           if (crs2 == 0) {
             // TODO: jalr, ebreak
-            todo = true;
+            if (crds1 == 0) {
+              // TODO: ebreak
+              todo = true;
+            } else {
+              // c.jalr, expands to jalr x1, 0(rs1)
+              // default cimm64 value is zero, so no need to set immediate
+              opc = 0b11001;
+              funct3 = 0b000;
+              rd = 1;
+              rs1 = crds1;
+            }
           } else {
             // c.add, expands to add rd, rd, rs2
             opc = 0b01100;
@@ -575,10 +696,7 @@ void step() {
               todo = true;
             } else {
               // c.jr, expands to jalr x0, 0(rs1)
-              //
-              // we can leave the immediate along here because decoding this
-              // instruction with the 6-bit immediate format results in a
-              // decoded immediate of 0
+              // default cimm64 value is zero, so no need to set immediate
               opc = 0b11001;
               funct3 = 0b000;
               rd = 0;
@@ -596,13 +714,21 @@ void step() {
           }
         }
         break;
+      case 0b110:
+        // c.swsp, expands to sw rs2, offset(x2)
+        opc = 0b01000;
+        funct3 = 0b010;
+        rs1 = 2;
+        rs2 = crs2;
+        cimm64 = ((op & 0x1e00) >> 7) | ((op & 0x180) >> 1);
+        break;
       case 0b111:
         // c.sdsp, expands to sd rs2, offset(x2)
         opc = 0b01000;
         funct3 = 0b011;
         rs1 = 2;
         rs2 = crs2;
-        cimm64 = cimm6_sdsp_zext64;
+        cimm64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
         break;
       default:
         todo = true;
@@ -995,8 +1121,9 @@ void step() {
     todo = true;
   }
 
-  // todo |= pc == 0x8000f47e;
-  if (todo) {
+  static bool print = false;
+  print |= pc == 0x8000f486;
+  if (todo || print) {
     putchar('\n');
     fflush(stdout);
 
@@ -1051,6 +1178,12 @@ void step() {
       result = mem_read_8b_aligned(addr);
       dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
     }
+
+    uint64_t watch = 0xbfe00004;
+    if ((addr & -0x4) == watch) {
+      fprintf(stderr, "LOAD RESULT FOR %lx = %lx\n", addr, result);
+      todo = true;
+    }
   } else if (do_store) {
     switch (funct3) {
     case 0b00:
@@ -1066,6 +1199,11 @@ void step() {
       mem_write_8b_aligned(addr, src2);
     }
     dbg_log_memory(DBG_EVENT_STORE, addr, 1 << funct3, src2);
+    uint64_t watch = 0xbfe00000;
+    if ((addr & -0x8) == watch) {
+      fprintf(stderr, "STORE DATA FOR %lx = %lx\n", addr, src2);
+      todo = true;
+    }
   } else if (amo) {
     // do the alu operation here
     // TODO: actually look at the acquire and release fields
@@ -1104,6 +1242,8 @@ void step() {
     hart.regfile[rd] = result;
   }
 
+  todo |= (rd == 10) && (result == -9);
+
   // update pc
   if (do_jump) {
     dbg_log_branch(pc, jump_pc);
@@ -1118,6 +1258,8 @@ int main() {
   // the firmware seems unable to function without 1 GiB of RAM, even in QEMU
   uint64_t dram_size = 1024 * 1024 * 1024;
 
+  uint64_t fdt_addr = 0xbfe00000;
+  memcpy(reset_vec + 8, &fdt_addr, 8);
   build_memory_map(dram_size);
   load_elf_to_physical_memory(
       "/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.elf");
