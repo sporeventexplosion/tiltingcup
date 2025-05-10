@@ -26,11 +26,13 @@ struct Hart {
 
 Hart hart = {};
 
+static uint64_t n_retired = 0;
+
 const static size_t dbg_event_buf_cap = 4096;
 const static size_t dbg_max_event_len = 8;
 static size_t dbg_event_buf_size = 0;
 static uint64_t *dbg_event_buf;
-crypto_generichash_state dbg_event_hash_state;
+static crypto_generichash_state dbg_event_hash_state;
 
 void dbg_init() {
   assert(sodium_init() >= 0);
@@ -362,10 +364,8 @@ void step() {
   uint8_t rs1 = 0;
   uint8_t rs2 = 0;
 
-  bool use_cimm5 = false;
-
   uint64_t imm20_j_sext64 = 0;
-  uint64_t cimm5_sext64;
+  uint64_t cimm_sext64 = 0;
   if (compressed) {
     // expand compressed instructions
     uint8_t cmap = op & 3;
@@ -373,7 +373,9 @@ void step() {
     bool cbit12 = op & 0x1000;
     uint8_t crds1 = (op >> 7) & 0x1f;
     uint8_t crs2 = (op >> 2) & 0x1f;
-    cimm5_sext64 = -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
+
+    uint64_t cimm6_sext64 = -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
+    cimm_sext64 = cimm6_sext64;
 
     if (cmap == 0b00) {
       todo = true;
@@ -381,7 +383,6 @@ void step() {
       switch (cfunct3) {
       case 0b000:
         // c.addi, expands to addi rd, rd, imm
-        use_cimm5 = true;
         opc = 0b00100;
         funct3 = 0b000;
         rd = crds1;
@@ -389,11 +390,26 @@ void step() {
         break;
       case 0b010:
         // c.li, expands to addi rd, x0, imm
-        use_cimm5 = true;
         opc = 0b00100;
         funct3 = 0b000;
         rd = crds1;
         rs1 = 0;
+        break;
+      case 0b011:
+        if (cimm6_sext64 != 0) {
+          if (crds1 == 2) {
+            // TODO: c.addi16sp
+            todo = true;
+          } else {
+            // c.lui, expands to lui rd, imm
+            opc = 0b01101;
+            rd = crds1;
+            cimm_sext64 = cimm6_sext64 << 12;
+          }
+        } else {
+          // reserved
+          todo = true;
+        }
         break;
       case 0b101:
         // c.j, expands to jal x0, offset
@@ -434,6 +450,10 @@ void step() {
               todo = true;
             } else {
               // c.jr, expands to jalr x0, 0(rs1)
+              //
+              // we can leave the immediate along here because decoding this
+              // instruction with the 6-bit immediate format results in a
+              // decoded immediate of 0
               opc = 0b11001;
               funct3 = 0b000;
               rd = 0;
@@ -462,10 +482,9 @@ void step() {
                                ((op & 0x100000) >> 9) | (op & 0xff000));
   }
 
-  uint64_t imm20_u_sext64 = (int32_t)(op & -0x1000);
+  uint64_t imm20_u_sext64 = compressed ? cimm_sext64 : (int32_t)(op & -0x1000);
   uint16_t imm12_i_raw = op >> 20;
-  uint64_t imm12_i_sext64 =
-      compressed ? (use_cimm5 ? cimm5_sext64 : 0) : (int32_t)op >> 20;
+  uint64_t imm12_i_sext64 = compressed ? cimm_sext64 : (int32_t)op >> 20;
   uint64_t imm12_s_sext64 =
       (int32_t)(((int32_t)(op & 0xfe000000u) >> 20) | ((op & 0xf80) >> 7));
 
@@ -624,6 +643,11 @@ void step() {
     break;
   }
 
+  case 0b01101:
+    // lui
+    result = imm20_u_sext64;
+    break;
+
   case 0b11000:
     // branch instructions
     rd = 0;
@@ -735,7 +759,8 @@ void step() {
     } else {
       sprintf(op_hex, "%08x", op);
     }
-    fprintf(stderr, "TODO: pc = %lx, op = %s\n", pc, op_hex);
+    fprintf(stderr, "TODO: pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
+            n_retired);
     fprintf(stderr, "Register state:\n");
     for (int i = 0; i < 32; i++) {
       uint64_t reg = hart.regfile[i];
@@ -798,6 +823,8 @@ void step() {
     dbg_log_branch(pc, jump_pc);
   }
   hart.pc = do_jump ? jump_pc : next_pc;
+
+  n_retired++;
 }
 
 int main() {
