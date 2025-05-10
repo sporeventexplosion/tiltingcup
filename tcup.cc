@@ -210,9 +210,33 @@ static uint32_t fetch_insn(uint64_t addr) {
   assert(false);
 }
 
+struct Csr {
+  // mtvec: 0x305 machine rw
+  uint64_t mtvec;
+  // mscratch: 0x340 machine rw
+  uint64_t mscratch;
+};
+
+uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
+  switch (op_type) {
+  case 0b01:
+    // csrrw
+    return next;
+  case 0b10:
+    // csrrs
+    return old | next;
+  case 0b11:
+    // csrrc:
+    return old & ~next;
+  default:
+    assert(false);
+  }
+}
+
 struct Hart {
   uint64_t regfile[32];
   uint64_t pc;
+  Csr csr;
 };
 
 Hart hart = {};
@@ -548,26 +572,57 @@ void step() {
     break;
 
   case 0b11100:
-    switch (funct3) {
-    case 0b010:
-      // csrrs
-      // TODO
-      if (rs1 != 0)
-        todo = true;
-      // TODO
-      if (imm12_i_raw != 0xf14)
-        todo = true; // mhartid csr
-      result = 0;
-      break;
-    default:
+    if ((funct3 & 0b11) == 0) {
+      // TODO: ecall, etc.
       todo = true;
+    } else {
+      // CSR manipulation instructions
+      uint8_t op_type = funct3 & 0b11;
+      bool has_imm = funct3 & 0b100;
+      uint64_t src_val = has_imm ? rs1 : src1;
+
+      // for now, we unconditionally do reads since no csr read has side effects
+      bool do_csr_write = !((op_type & 0b10) && rs1 == 0);
+
+      bool writeable = (imm12_i_raw >> 10) != 0b11;
+      if (!writeable && do_csr_write) {
+        todo = true;
+      } else {
+        switch (imm12_i_raw) {
+        case 0x305:
+          // mtvec: machine rw
+          result = hart.csr.mtvec;
+          if (do_csr_write) {
+            uint64_t next = get_csr_next_value(result, src_val, op_type);
+            if (next & 2) {
+              // reserved
+              todo = true;
+            } else {
+              hart.csr.mtvec = next;
+            }
+          }
+          break;
+        case 0x340:
+          // mscratch: machine rw
+          result = hart.csr.mscratch;
+          if (do_csr_write) {
+            hart.csr.mscratch = get_csr_next_value(result, src_val, op_type);
+          }
+          break;
+        case 0xf14:
+          // mhartid: machine ro
+          result = 0;
+          break;
+        default:
+          todo = true;
+        }
+      }
     }
     break;
   default:
     todo = true;
   }
 
-  printf("pc = %lx\n", pc);
   if (todo) {
     char op_hex[9];
     if (compressed) {
@@ -627,7 +682,18 @@ void step() {
   if (rd != 0) {
     hart.regfile[rd] = result;
   }
+
   // update pc
+  if (do_jump) {
+    static uint64_t last_jump_src = 1, last_jump_dst = 1;
+    if (!(pc == last_jump_src && jump_pc == last_jump_dst)) {
+      last_jump_src = pc;
+      last_jump_dst = jump_pc;
+      printf("jump from = %lx to %lx\n", pc, jump_pc);
+    } else {
+      putchar('.');
+    }
+  }
   hart.pc = do_jump ? jump_pc : next_pc;
 }
 
