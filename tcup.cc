@@ -114,12 +114,13 @@ void dbg_log_branch(uint64_t from, uint64_t to) {
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_src;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_dst;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_count;
+      putchar('\n');
     }
 
     dbg_last_jump_src = from;
     dbg_last_jump_dst = to;
     dbg_last_jump_count = 1;
-    printf("jump from = %lx to %lx\n", from, to);
+    printf("jump from = %lx to %lx", from, to);
   }
 }
 
@@ -267,6 +268,16 @@ static uint32_t mem_read_4b_aligned(uint64_t addr) {
   assert(false);
 }
 
+static uint8_t mem_read_1b(uint64_t addr) {
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr) {
+      uint64_t offset = addr - entry.start;
+      return ((uint8_t *)entry.ptr)[offset];
+    }
+  }
+  assert(false);
+}
+
 static uint64_t mem_read_8b_aligned(uint64_t addr) {
   assert(addr % 8 == 0);
 
@@ -364,8 +375,7 @@ void step() {
   uint8_t rs1 = 0;
   uint8_t rs2 = 0;
 
-  uint64_t imm20_j_sext64 = 0;
-  uint64_t cimm_sext64 = 0;
+  uint64_t cimm64 = 0;
   if (compressed) {
     // expand compressed instructions
     uint8_t cmap = op & 3;
@@ -373,13 +383,56 @@ void step() {
     bool cbit12 = op & 0x1000;
     uint8_t crds1 = (op >> 7) & 0x1f;
     uint8_t crs2 = (op >> 2) & 0x1f;
+    uint8_t crds1p = (crds1 & 0x7) | 0x8;
+    uint8_t crds2p = (crs2 & 0x7) | 0x8;
 
     uint64_t cimm6_sext64 = -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
-    cimm_sext64 = cimm6_sext64;
+    cimm64 = cimm6_sext64;
 
     if (cmap == 0b00) {
-      todo = true;
+      // Map 0b00
+
+      uint64_t cimm5_lsd_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x60) << 1);
+
+      switch (cfunct3) {
+      case 0b000:
+        // c.addi4spn, expands to addi rd', x2, imm
+        //  12 |  11 |  10 |   9 |   8 |   7 |   6 |   5
+        //   5 |   4 |   9 |   8 |   7 |   6 |   2 |   3
+        opc = 0b00100;
+        funct3 = 0b000;
+        rd = crds2p;
+        rs1 = 2;
+        cimm64 = ((op & 0x1800) >> 7) | ((op & 0x780) >> 1) |
+                 ((op & 0x40) >> 4) | ((op & 0x20) >> 2);
+
+        if (cimm64 == 0) {
+          // all-zeros instruction
+          todo = true;
+        }
+        fprintf(stderr, "cimm8_addi4spn = %lu, rd = %d, rs = %d\n", cimm64, rd,
+                rs1);
+        break;
+
+      case 0b111:
+        // c.sd, expands to sd rs2′, offset(rs1′)
+        // TODO: verify this works
+        todo = true;
+
+        opc = 0b01000;
+        funct3 = 0b011;
+        rs1 = crds1p;
+        rs2 = crds2p;
+        cimm64 = cimm5_lsd_zext64;
+        fprintf(stderr, "cimm5_lsd_zext64 = %lu, rs1 = %d, rs2 = %d\n",
+                cimm5_lsd_zext64, rs1, rs2);
+        break;
+      default:
+        todo = true;
+      }
     } else if (cmap == 0b01) {
+      // Map 0b01
+
       switch (cfunct3) {
       case 0b000:
         // c.addi, expands to addi rd, rd, imm
@@ -397,14 +450,23 @@ void step() {
         break;
       case 0b011:
         if (cimm6_sext64 != 0) {
+          rd = crds1;
+          rs1 = crds1;
           if (crds1 == 2) {
-            // TODO: c.addi16sp
-            todo = true;
+            // c.addi16sp, expands to addi x2, x2, imm
+            //  12 |  11 |  10 |   9 |   8 |   7 |   6 |   5 |   4 |   3 |   2
+            //   9 |                             |   4 |   6 |   8 |   7 |   5
+
+            opc = 0b00100;
+            funct3 = 0b000;
+            cimm64 = -((int64_t)(op & 0x1000) >> 3) | ((op & 0x40) >> 2) |
+                     ((op & 0x20) << 1) | ((op & 0x18) << 4) |
+                     ((op & 0x4) << 3);
+
           } else {
             // c.lui, expands to lui rd, imm
             opc = 0b01101;
-            rd = crds1;
-            cimm_sext64 = cimm6_sext64 << 12;
+            cimm64 = cimm6_sext64 << 12;
           }
         } else {
           // reserved
@@ -419,15 +481,19 @@ void step() {
         // always a multiple of two
         opc = 0b11011;
         rd = 0;
-        imm20_j_sext64 = -((int64_t)(op & 0x1000) >> 1) | ((op & 0x800) >> 7) |
-                         ((op & 0x600) >> 1) | ((op & 0x100) << 2) |
-                         ((op & 0x80) >> 1) | ((op & 0x40) << 1) |
-                         ((op & 0x38) >> 2) | ((op & 0x4) << 3);
+        cimm64 = -((int64_t)(op & 0x1000) >> 1) | ((op & 0x800) >> 7) |
+                 ((op & 0x600) >> 1) | ((op & 0x100) << 2) |
+                 ((op & 0x80) >> 1) | ((op & 0x40) << 1) | ((op & 0x38) >> 2) |
+                 ((op & 0x4) << 3);
         break;
       default:
         todo = true;
       }
     } else if (cmap == 0b10) {
+      // Map 0b10
+
+      uint64_t cimm6_lsdsp_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
+
       switch (cfunct3) {
       case 0b100:
         if (cbit12) {
@@ -460,9 +526,24 @@ void step() {
               rs1 = crds1;
             }
           } else {
-            todo = true;
+            // c.mv, officially expands to add rd, x0, rs2,
+            // but we instead expand to addi rd, rs2, 0 without changing the
+            // semantics (see the instruction set manual)
+            opc = 0b00100;
+            funct3 = 0b000;
+            rd = crds1;
+            rs1 = crs2;
+            cimm64 = 0;
           }
         }
+        break;
+      case 0b111:
+        // c.sdsp, expands to sd rs2, offset(x2)
+        opc = 0b01000;
+        funct3 = 0b011;
+        rs1 = 2;
+        rs2 = crs2;
+        cimm64 = cimm6_lsdsp_zext64;
         break;
       default:
         todo = true;
@@ -477,21 +558,25 @@ void step() {
     rs2 = (op >> 20) & 0x1f;
 
     // always a multiple of two
-    imm20_j_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 11) |
-                               ((op & 0x7fe00000u) >> 20) |
-                               ((op & 0x100000) >> 9) | (op & 0xff000));
   }
 
-  uint64_t imm20_u_sext64 = compressed ? cimm_sext64 : (int32_t)(op & -0x1000);
+  uint64_t imm20_u_sext64 = compressed ? cimm64 : (int32_t)(op & -0x1000);
   uint16_t imm12_i_raw = op >> 20;
-  uint64_t imm12_i_sext64 = compressed ? cimm_sext64 : (int32_t)op >> 20;
+  uint64_t imm12_i_sext64 = compressed ? cimm64 : (int32_t)op >> 20;
   uint64_t imm12_s_sext64 =
-      (int32_t)(((int32_t)(op & 0xfe000000u) >> 20) | ((op & 0xf80) >> 7));
+      compressed ? cimm64
+                 : (int32_t)(((int32_t)(op & 0xfe000000u) >> 20) |
+                             ((op & 0xf80) >> 7));
 
-  // always a multiple of two
   uint64_t imm12_b_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
                                       ((op & 0x7e000000u) >> 20) |
                                       ((op & 0xf00) >> 7) | ((op & 0x80) << 4));
+  // always a multiple of two
+  uint64_t imm20_j_sext64 =
+      compressed ? cimm64
+                 : (int32_t)(((int32_t)(op & 0x80000000u) >> 11) |
+                             ((op & 0x7fe00000u) >> 20) |
+                             ((op & 0x100000) >> 9) | (op & 0xff000));
 
   // execute
   uint64_t pc = hart.pc;
@@ -511,16 +596,13 @@ void step() {
 
   switch (opc) {
   case 0b00000:
-    // loads
+    // integer register loads
     do_load = true;
-    switch (funct3) {
-    case 0b011:
-      // ld
-      addr = src1 + imm12_i_sext64;
-      break;
-    default:
+    if (funct3 == 0b111) {
+      // invalid instruction
       todo = true;
     }
+    addr = src1 + imm12_i_sext64;
     break;
 
   case 0b00011:
@@ -753,6 +835,9 @@ void step() {
   }
 
   if (todo) {
+    putchar('\n');
+    fflush(stdout);
+
     char op_hex[9];
     if (compressed) {
       sprintf(op_hex, "%04x", (uint16_t)op);
@@ -774,8 +859,37 @@ void step() {
   // memory
   if (do_load) {
     // TODO: different sizes
-    result = mem_read_8b_aligned(addr);
-    dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
+    bool do_zext = funct3 & 4;
+    switch (funct3 & 0b11) {
+    case 0b00: {
+      // lb, lbu
+      uint8_t result_8b = mem_read_1b(addr);
+      result = do_zext ? result_8b : (int8_t)result_8b;
+      dbg_log_memory(DBG_EVENT_LOAD, addr, 1 | ((uint64_t)do_zext << 12),
+                     result);
+      break;
+    }
+    case 0b01: {
+      // lh, lhu
+      uint16_t result_16b = mem_read_2b_aligned(addr);
+      result = do_zext ? result_16b : (int16_t)result_16b;
+      dbg_log_memory(DBG_EVENT_LOAD, addr, 2 | ((uint64_t)do_zext << 12),
+                     result);
+      break;
+    }
+    case 0b10: {
+      // lw, lwu
+      uint32_t result_32b = mem_read_4b_aligned(addr);
+      result = do_zext ? result_32b : (int32_t)result_32b;
+      dbg_log_memory(DBG_EVENT_LOAD, addr, 4 | ((uint64_t)do_zext << 12),
+                     result);
+      break;
+    }
+    case 0b11:
+      // ld
+      result = mem_read_8b_aligned(addr);
+      dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
+    }
   } else if (do_store) {
     // TODO: different sizes
     mem_write_8b_aligned(addr, src2);
