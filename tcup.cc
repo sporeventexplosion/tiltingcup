@@ -9,6 +9,126 @@
 #include <cstring>
 #include <vector>
 
+#include <sodium.h>
+
+struct Csr {
+  // mtvec: 0x305 machine rw
+  uint64_t mtvec;
+  // mscratch: 0x340 machine rw
+  uint64_t mscratch;
+};
+
+struct Hart {
+  uint64_t regfile[32];
+  uint64_t pc;
+  Csr csr;
+};
+
+Hart hart = {};
+
+const static size_t dbg_event_buf_cap = 4096;
+const static size_t dbg_max_event_len = 8;
+static size_t dbg_event_buf_size = 0;
+static uint64_t *dbg_event_buf;
+crypto_generichash_state dbg_event_hash_state;
+
+void dbg_init() {
+  assert(sodium_init() >= 0);
+  dbg_event_buf = new uint64_t[dbg_event_buf_cap];
+  assert(dbg_event_buf);
+
+  crypto_generichash_init(&dbg_event_hash_state, nullptr, 0,
+                          crypto_generichash_BYTES);
+}
+
+void dbg_force_compress_events() {
+  crypto_generichash_update(&dbg_event_hash_state,
+                            (unsigned char *)dbg_event_buf,
+                            dbg_event_buf_size * sizeof(uint64_t));
+  dbg_event_buf_size = 0;
+}
+
+void dbg_compress_events() {
+  if (dbg_event_buf_size > dbg_event_buf_cap - dbg_max_event_len) {
+    dbg_force_compress_events();
+  }
+}
+
+static char digit_to_hex(int n) { return n + (n < 10 ? 48 : 87); }
+
+static void bytes_to_hex_str(const unsigned char *bytes, char *str,
+                             size_t byte_len) {
+  for (size_t i = 0; i < byte_len; i++) {
+    str[2 * i] = digit_to_hex(bytes[i] >> 4);
+    str[2 * i + 1] = digit_to_hex(bytes[i] & 0xf);
+  }
+  str[2 * byte_len] = '\0';
+}
+
+void dbg_print_events_hash(FILE *outfile) {
+  dbg_force_compress_events();
+  crypto_generichash_state tmp_hash_state;
+  memcpy(&tmp_hash_state, &dbg_event_hash_state,
+         sizeof(crypto_generichash_state));
+
+  unsigned char hash[8];
+  crypto_generichash_final(&tmp_hash_state, hash, sizeof hash);
+
+  char hash_hex[2 * sizeof hash + 1];
+  bytes_to_hex_str(hash, hash_hex, sizeof hash);
+  fprintf(outfile, "Events hash: %s\n", hash_hex);
+}
+
+void dbg_print_regfile_hash(FILE *outfile, Hart *hart) {
+  unsigned char hash[8];
+  crypto_generichash(hash, sizeof hash, (unsigned char *)&hart->regfile,
+                     sizeof hart->regfile, nullptr, 0);
+
+  char hash_hex[2 * sizeof hash + 1];
+  bytes_to_hex_str(hash, hash_hex, sizeof hash);
+  fprintf(outfile, "Register file hash: %s\n", hash_hex);
+}
+
+// initial dummy value, instruction addresses are always even
+static uint64_t dbg_last_jump_src = 1, dbg_last_jump_dst = 1;
+static uint64_t dbg_last_jump_count = 0;
+
+enum {
+  DBG_EVENT_BRANCH_COALESCED,
+  DBG_EVENT_LOAD,
+  DBG_EVENT_STORE,
+  DBG_EVENT_ATOMIC,
+};
+
+void dbg_log_branch(uint64_t from, uint64_t to) {
+  if (from == dbg_last_jump_src && to == dbg_last_jump_dst) {
+    dbg_last_jump_count++;
+    putchar('.');
+  } else {
+    bool first = dbg_last_jump_src & 1;
+    if (!first) {
+      dbg_compress_events();
+      dbg_event_buf[dbg_event_buf_size++] = DBG_EVENT_BRANCH_COALESCED;
+      dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_src;
+      dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_dst;
+      dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_count;
+    }
+
+    dbg_last_jump_src = from;
+    dbg_last_jump_dst = to;
+    dbg_last_jump_count = 1;
+    printf("jump from = %lx to %lx\n", from, to);
+  }
+}
+
+void dbg_log_memory(int event, uint64_t addr, uint64_t attrs, uint64_t data) {
+  dbg_compress_events();
+  dbg_event_buf[dbg_event_buf_size++] = event;
+  dbg_event_buf[dbg_event_buf_size++] = addr;
+  dbg_event_buf[dbg_event_buf_size++] = attrs;
+  dbg_event_buf[dbg_event_buf_size++] = data;
+}
+
 const char *reg_names[32] = {
     "zero  (x0)", "ra  (x1)", "sp  (x2)",  "gp  (x3)",  "tp  (x4)", "t0  (x5)",
     "t1  (x6)",   "t2  (x7)", "s0  (x8)",  "s1  (x9)",  "a0 (x10)", "a1 (x11)",
@@ -210,13 +330,6 @@ static uint32_t fetch_insn(uint64_t addr) {
   assert(false);
 }
 
-struct Csr {
-  // mtvec: 0x305 machine rw
-  uint64_t mtvec;
-  // mscratch: 0x340 machine rw
-  uint64_t mscratch;
-};
-
 uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
   switch (op_type) {
   case 0b01:
@@ -232,14 +345,6 @@ uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
     assert(false);
   }
 }
-
-struct Hart {
-  uint64_t regfile[32];
-  uint64_t pc;
-  Csr csr;
-};
-
-Hart hart = {};
 
 void step() {
   bool todo = false;
@@ -357,7 +462,7 @@ void step() {
                                ((op & 0x100000) >> 9) | (op & 0xff000));
   }
 
-  uint32_t imm20_u = op & -0x1000;
+  uint64_t imm20_u_sext64 = (int32_t)(op & -0x1000);
   uint16_t imm12_i_raw = op >> 20;
   uint64_t imm12_i_sext64 =
       compressed ? (use_cimm5 ? cimm5_sext64 : 0) : (int32_t)op >> 20;
@@ -445,7 +550,7 @@ void step() {
 
   case 0b00101:
     // auipc
-    result = pc + imm20_u;
+    result = pc + imm20_u_sext64;
     break;
 
   case 0b01000:
@@ -636,6 +741,8 @@ void step() {
       uint64_t reg = hart.regfile[i];
       fprintf(stderr, "    %10s  0x%016lx  %ld\n", reg_names[i], reg, reg);
     }
+    dbg_print_events_hash(stderr);
+    dbg_print_regfile_hash(stderr, &hart);
   }
   assert(!todo);
 
@@ -643,9 +750,11 @@ void step() {
   if (do_load) {
     // TODO: different sizes
     result = mem_read_8b_aligned(addr);
+    dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
   } else if (do_store) {
     // TODO: different sizes
     mem_write_8b_aligned(addr, src2);
+    dbg_log_memory(DBG_EVENT_STORE, addr, 8, src2);
   } else if (amo) {
     // do the alu operation here
     // TODO: actually look at the acquire and release fields
@@ -669,6 +778,7 @@ void step() {
         }
 
         mem_write_4b_aligned(src1, after);
+        dbg_log_memory(DBG_EVENT_ATOMIC, src1, 4, after);
       } else {
         // TODO: error out on misaligned atomics
         todo = true;
@@ -685,19 +795,14 @@ void step() {
 
   // update pc
   if (do_jump) {
-    static uint64_t last_jump_src = 1, last_jump_dst = 1;
-    if (!(pc == last_jump_src && jump_pc == last_jump_dst)) {
-      last_jump_src = pc;
-      last_jump_dst = jump_pc;
-      printf("jump from = %lx to %lx\n", pc, jump_pc);
-    } else {
-      putchar('.');
-    }
+    dbg_log_branch(pc, jump_pc);
   }
   hart.pc = do_jump ? jump_pc : next_pc;
 }
 
 int main() {
+  dbg_init();
+
   uint64_t dram_size = 256ul * 1024 * 1024;
 
   build_memory_map(dram_size);
