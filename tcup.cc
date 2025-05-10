@@ -244,6 +244,16 @@ static void load_elf_to_physical_memory(const char *filepath) {
   }
 }
 
+static uint8_t mem_read_1b(uint64_t addr) {
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr) {
+      uint64_t offset = addr - entry.start;
+      return ((uint8_t *)entry.ptr)[offset];
+    }
+  }
+  assert(false);
+}
+
 static uint16_t mem_read_2b_aligned(uint64_t addr) {
   assert(addr % 2 == 0);
 
@@ -268,16 +278,6 @@ static uint32_t mem_read_4b_aligned(uint64_t addr) {
   assert(false);
 }
 
-static uint8_t mem_read_1b(uint64_t addr) {
-  for (auto &entry : memory_map) {
-    if (entry.start <= addr && entry.start + entry.size > addr) {
-      uint64_t offset = addr - entry.start;
-      return ((uint8_t *)entry.ptr)[offset];
-    }
-  }
-  assert(false);
-}
-
 static uint64_t mem_read_8b_aligned(uint64_t addr) {
   assert(addr % 8 == 0);
 
@@ -285,6 +285,30 @@ static uint64_t mem_read_8b_aligned(uint64_t addr) {
     if (entry.start <= addr && entry.start + entry.size > addr + 7) {
       uint64_t offset = (addr - entry.start) / 8;
       return ((uint64_t *)entry.ptr)[offset];
+    }
+  }
+  assert(false);
+}
+
+static void mem_write_1b(uint64_t addr, uint8_t data) {
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr) {
+      uint64_t offset = addr - entry.start;
+      ((uint8_t *)entry.ptr)[offset] = data;
+      return;
+    }
+  }
+  assert(false);
+}
+
+static void mem_write_2b_aligned(uint64_t addr, uint16_t data) {
+  assert(addr % 2 == 0);
+
+  for (auto &entry : memory_map) {
+    if (entry.start <= addr && entry.start + entry.size > addr + 1) {
+      uint64_t offset = (addr - entry.start) / 2;
+      ((uint16_t *)entry.ptr)[offset] = data;
+      return;
     }
   }
   assert(false);
@@ -434,6 +458,14 @@ void step() {
       case 0b000:
         // c.addi, expands to addi rd, rd, imm
         opc = 0b00100;
+        funct3 = 0b000;
+        rd = crds1;
+        rs1 = crds1;
+        cimm64 = cimm6_sext64;
+        break;
+      case 0b001:
+        // c.addiw, expands to addiw rd, rd, imm
+        opc = 0b00110;
         funct3 = 0b000;
         rd = crds1;
         rs1 = crds1;
@@ -625,7 +657,7 @@ void step() {
 
   switch (opc) {
   case 0b00000:
-    // integer register loads
+    // integer register loads: lb, lh, lw, ld, lbu, lhu, lwu
     do_load = true;
     if (funct3 == 0b111) {
       // invalid instruction
@@ -647,11 +679,20 @@ void step() {
     }
     break;
 
-  case 0b00100:
+  case 0b00100: {
+    uint8_t shift_amount_64bit = imm12_i_sext64 & 0x3f;
     switch (funct3) {
     case 0b000:
       // addi
       result = src1 + imm12_i_sext64;
+      break;
+    case 0b001:
+      // slli
+      if (imm12_i_sext64 & 0xfc0) {
+        // reserved
+        todo = true;
+      }
+      result = src1 << shift_amount_64bit;
       break;
     case 0b010:
       // slti
@@ -665,6 +706,17 @@ void step() {
       // xori
       result = src1 ^ imm12_i_sext64;
       break;
+    case 0b101: {
+      // srli, srai
+      if (imm12_i_sext64 & 0xbc0) {
+        // reserved
+        todo = true;
+      }
+      bool is_arith = imm12_i_sext64 & 0x400;
+      result = is_arith ? (int64_t)src1 >> shift_amount_64bit
+                        : src1 >> shift_amount_64bit;
+      break;
+    }
     case 0b110:
       // ori
       result = src1 | imm12_i_sext64;
@@ -677,6 +729,7 @@ void step() {
       todo = true;
     }
     break;
+  }
 
   case 0b00101:
     // auipc
@@ -687,20 +740,29 @@ void step() {
     // TODO: we decode constant shift instructions from imm12_s_sext64
     // because they are formally I-type instructions
     // and we (intend to) expand them as such from compressed encodings
-    uint8_t shift_amount = imm12_i_sext64 & 0x1f;
+    uint8_t shift_amount_32bit = imm12_i_sext64 & 0x1f;
     switch (funct3) {
     case 0b000:
       // addiw
       result = (int32_t)(src1 + imm12_i_sext64);
       break;
-    case 0b001: {
+    case 0b001:
       // slliw
       if (imm12_i_sext64 & 0xfe0) {
+        // reserved
         todo = true;
-        break;
       }
-      result = (int32_t)((uint32_t)src1 << shift_amount);
-
+      result = (int32_t)((uint32_t)src1 << shift_amount_32bit);
+      break;
+    case 0b101: {
+      // srliw, sraiw
+      if (imm12_i_sext64 & 0xbe0) {
+        // reserved
+        todo = true;
+      }
+      bool is_arith = imm12_i_sext64 & 0x400;
+      result = (int32_t)(is_arith ? (int32_t)src1 >> shift_amount_32bit
+                                  : (uint32_t)src1 >> shift_amount_32bit);
       break;
     }
 
@@ -711,16 +773,13 @@ void step() {
   }
 
   case 0b01000:
-    // stores
+    // integer register stores: sb, sh, sw, sd
     do_store = true;
-    switch (funct3) {
-    case 0b011:
-      // sd
-      addr = src1 + imm12_s_sext64;
-      break;
-    default:
+    if (funct3 & 4) {
+      // invalid instruction
       todo = true;
     }
+    addr = src1 + imm12_s_sext64;
     break;
 
   case 0b01011:
@@ -745,6 +804,12 @@ void step() {
       // sub
       result = is_alt_func ? src1 - src2 : src1 + src2;
       break;
+    case 0b001:
+      if (is_alt_func)
+        todo = true;
+      // sll
+      result = src1 << (src2 & 0x3f);
+      break;
     case 0b010:
       if (is_alt_func)
         todo = true;
@@ -763,6 +828,13 @@ void step() {
       // xor
       result = src1 ^ src2;
       break;
+    case 0b101: {
+      // srl, sra
+      uint8_t shift_amount = src2 & 0x3f;
+      result =
+          is_alt_func ? (int64_t)src1 >> shift_amount : src1 >> shift_amount;
+      break;
+    }
     case 0b110:
       if (is_alt_func)
         todo = true;
@@ -785,6 +857,38 @@ void step() {
     // lui
     result = imm20_u_sext64;
     break;
+
+  case 0b01110: {
+    if (funct7 & 0b1011111) {
+      todo = true;
+      break;
+    }
+
+    bool is_alt_func = funct7 == 0b0100000;
+    switch (funct3) {
+    case 0b000:
+      // addw
+      // subw
+      result = (int32_t)(is_alt_func ? src1 - src2 : src1 + src2);
+      break;
+    case 0b001:
+      if (is_alt_func)
+        todo = true;
+      // sllw
+      result = (int32_t)((uint32_t)src1 << (src2 & 0x1f));
+      break;
+    case 0b101: {
+      // srlw, sraw
+      uint8_t shift_amount = src2 & 0x1f;
+      result = (int32_t)(is_alt_func ? (int32_t)src1 >> shift_amount
+                                     : (uint32_t)src1 >> shift_amount);
+      break;
+    }
+    default:
+      todo = true;
+    }
+    break;
+  }
 
   case 0b11000:
     // branch instructions
@@ -848,7 +952,8 @@ void step() {
       bool has_imm = funct3 & 0b100;
       uint64_t src_val = has_imm ? rs1 : src1;
 
-      // for now, we unconditionally do reads since no csr read has side effects
+      // for now, we unconditionally do reads since no csr read has side
+      // effects
       bool do_csr_write = !((op_type & 0b10) && rs1 == 0);
 
       bool writeable = (imm12_i_raw >> 10) != 0b11;
@@ -915,7 +1020,6 @@ void step() {
 
   // memory
   if (do_load) {
-    // TODO: different sizes
     bool do_zext = funct3 & 4;
     switch (funct3 & 0b11) {
     case 0b00: {
@@ -948,9 +1052,20 @@ void step() {
       dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
     }
   } else if (do_store) {
-    // TODO: different sizes
-    mem_write_8b_aligned(addr, src2);
-    dbg_log_memory(DBG_EVENT_STORE, addr, 8, src2);
+    switch (funct3) {
+    case 0b00:
+      mem_write_1b(addr, src2);
+      break;
+    case 0b01:
+      mem_write_2b_aligned(addr, src2);
+      break;
+    case 0b10:
+      mem_write_4b_aligned(addr, src2);
+      break;
+    case 0b11:
+      mem_write_8b_aligned(addr, src2);
+    }
+    dbg_log_memory(DBG_EVENT_STORE, addr, 1 << funct3, src2);
   } else if (amo) {
     // do the alu operation here
     // TODO: actually look at the acquire and release fields
