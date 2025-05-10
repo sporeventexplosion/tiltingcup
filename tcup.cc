@@ -120,7 +120,7 @@ void dbg_log_branch(uint64_t from, uint64_t to) {
     dbg_last_jump_src = from;
     dbg_last_jump_dst = to;
     dbg_last_jump_count = 1;
-    printf("jump from = %lx to %lx", from, to);
+    printf("jump from %lx to %lx", from, to);
   }
 }
 
@@ -386,8 +386,7 @@ void step() {
     uint8_t crds1p = (crds1 & 0x7) | 0x8;
     uint8_t crds2p = (crs2 & 0x7) | 0x8;
 
-    uint64_t cimm6_sext64 = -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
-    cimm64 = cimm6_sext64;
+    cimm64 = 0;
 
     if (cmap == 0b00) {
       // Map 0b00
@@ -410,8 +409,6 @@ void step() {
           // all-zeros instruction
           todo = true;
         }
-        fprintf(stderr, "cimm8_addi4spn = %lu, rd = %d, rs = %d\n", cimm64, rd,
-                rs1);
         break;
 
       case 0b111:
@@ -424,8 +421,6 @@ void step() {
         rs1 = crds1p;
         rs2 = crds2p;
         cimm64 = cimm5_lsd_zext64;
-        fprintf(stderr, "cimm5_lsd_zext64 = %lu, rs1 = %d, rs2 = %d\n",
-                cimm5_lsd_zext64, rs1, rs2);
         break;
       default:
         todo = true;
@@ -433,6 +428,8 @@ void step() {
     } else if (cmap == 0b01) {
       // Map 0b01
 
+      uint64_t cimm6_sext64 =
+          -((int64_t)(op & 0x1000) >> 7) | ((op & 0x7c) >> 2);
       switch (cfunct3) {
       case 0b000:
         // c.addi, expands to addi rd, rd, imm
@@ -440,6 +437,7 @@ void step() {
         funct3 = 0b000;
         rd = crds1;
         rs1 = crds1;
+        cimm64 = cimm6_sext64;
         break;
       case 0b010:
         // c.li, expands to addi rd, x0, imm
@@ -447,6 +445,7 @@ void step() {
         funct3 = 0b000;
         rd = crds1;
         rs1 = 0;
+        cimm64 = cimm6_sext64;
         break;
       case 0b011:
         if (cimm6_sext64 != 0) {
@@ -486,15 +485,43 @@ void step() {
                  ((op & 0x80) >> 1) | ((op & 0x40) << 1) | ((op & 0x38) >> 2) |
                  ((op & 0x4) << 3);
         break;
+      case 0b110:
+      case 0b111:
+        // c.beqz/c.bnez, expands to beq/bne rs1', x0, offset
+        //  12 |  11 |  10 |   9 |   8 |   7 |   6 |   5 |   4 |   3 |   2
+        //   8 |   4 |   3 |                 |   7 |   6 |   2 |   1 |   5
+        opc = 0b11000;
+        funct3 = cfunct3 & 1;
+        rs1 = crds1p;
+        rs2 = 0;
+        cimm64 = -((int64_t)(op & 0x1000) >> 4) | ((op & 0xc00) >> 7) |
+                 ((op & 0x60) << 1) | ((op & 0x18) >> 2) | ((op & 0x4) << 3);
+
+        break;
       default:
         todo = true;
       }
     } else if (cmap == 0b10) {
       // Map 0b10
 
-      uint64_t cimm6_lsdsp_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
+      uint64_t cimm6_ldsp_zext64 =
+          ((op & 0x1c00) >> 7) | ((op & 0x20) >> 2) | ((op & 0x1c) << 4);
+      uint64_t cimm6_sdsp_zext64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
 
       switch (cfunct3) {
+      case 0b011:
+        if (crds1 == 0) {
+          // reserved
+          todo = true;
+        } else {
+          // c.slsp, expands to ld rd, offset(x2)
+          opc = 0b00000;
+          funct3 = 0b011;
+          rd = crds1;
+          rs1 = 2;
+          cimm64 = cimm6_ldsp_zext64;
+        }
+        break;
       case 0b100:
         if (cbit12) {
           if (crs2 == 0) {
@@ -543,7 +570,7 @@ void step() {
         funct3 = 0b011;
         rs1 = 2;
         rs2 = crs2;
-        cimm64 = cimm6_lsdsp_zext64;
+        cimm64 = cimm6_sdsp_zext64;
         break;
       default:
         todo = true;
@@ -568,9 +595,11 @@ void step() {
                  : (int32_t)(((int32_t)(op & 0xfe000000u) >> 20) |
                              ((op & 0xf80) >> 7));
 
-  uint64_t imm12_b_sext64 = (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
-                                      ((op & 0x7e000000u) >> 20) |
-                                      ((op & 0xf00) >> 7) | ((op & 0x80) << 4));
+  uint64_t imm12_b_sext64 =
+      compressed ? cimm64
+                 : (int32_t)(((int32_t)(op & 0x80000000u) >> 19) |
+                             ((op & 0x7e000000u) >> 20) | ((op & 0xf00) >> 7) |
+                             ((op & 0x80) << 4));
   // always a multiple of two
   uint64_t imm20_j_sext64 =
       compressed ? cimm64
@@ -653,6 +682,33 @@ void step() {
     // auipc
     result = pc + imm20_u_sext64;
     break;
+
+  case 0b00110: {
+    // TODO: we decode constant shift instructions from imm12_s_sext64
+    // because they are formally I-type instructions
+    // and we (intend to) expand them as such from compressed encodings
+    uint8_t shift_amount = imm12_i_sext64 & 0x1f;
+    switch (funct3) {
+    case 0b000:
+      // addiw
+      result = (int32_t)(src1 + imm12_i_sext64);
+      break;
+    case 0b001: {
+      // slliw
+      if (imm12_i_sext64 & 0xfe0) {
+        todo = true;
+        break;
+      }
+      result = (int32_t)((uint32_t)src1 << shift_amount);
+
+      break;
+    }
+
+    default:
+      todo = true;
+    }
+    break;
+  }
 
   case 0b01000:
     // stores
@@ -834,6 +890,7 @@ void step() {
     todo = true;
   }
 
+  // todo |= pc == 0x8000f47e;
   if (todo) {
     putchar('\n');
     fflush(stdout);
@@ -943,8 +1000,8 @@ void step() {
 
 int main() {
   dbg_init();
-
-  uint64_t dram_size = 256ul * 1024 * 1024;
+  // the firmware seems unable to function without 1 GiB of RAM, even in QEMU
+  uint64_t dram_size = 1024 * 1024 * 1024;
 
   build_memory_map(dram_size);
   load_elf_to_physical_memory(
