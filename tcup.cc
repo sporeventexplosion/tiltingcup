@@ -11,6 +11,9 @@
 
 #include <sodium.h>
 
+typedef __int128 s128;
+typedef unsigned __int128 u128;
+
 struct Csr {
   // mtvec: 0x305 machine rw
   uint64_t mtvec;
@@ -26,7 +29,15 @@ struct Hart {
 
 Hart hart = {};
 
-static bool todo = false;
+bool todo = false;
+uint64_t todo_line = ~0ul;
+
+#define SET_TODO()                                                             \
+  do {                                                                         \
+    todo = true;                                                               \
+    todo_line = __LINE__;                                                      \
+  } while (0)
+
 static uint64_t n_retired = 0;
 
 const static size_t dbg_event_buf_cap = 4096;
@@ -283,7 +294,7 @@ static uint8_t mem_read_1b(uint64_t addr) {
       return ((uint8_t *)entry.ptr)[offset];
     }
   }
-  todo = true;
+  SET_TODO();
   return -1;
 }
 
@@ -296,7 +307,7 @@ static uint16_t mem_read_2b_aligned(uint64_t addr) {
       return ((uint16_t *)entry.ptr)[offset];
     }
   }
-  todo = true;
+  SET_TODO();
   return -1;
 }
 
@@ -309,7 +320,7 @@ static uint32_t mem_read_4b_aligned(uint64_t addr) {
       return ((uint32_t *)entry.ptr)[offset];
     }
   }
-  todo = true;
+  SET_TODO();
   return -1;
 }
 
@@ -322,7 +333,7 @@ static uint64_t mem_read_8b_aligned(uint64_t addr) {
       return ((uint64_t *)entry.ptr)[offset];
     }
   }
-  todo = true;
+  SET_TODO();
   return -1;
 }
 
@@ -334,7 +345,7 @@ static void mem_write_1b(uint64_t addr, uint8_t data) {
       return;
     }
   }
-  todo = true;
+  SET_TODO();
 }
 
 static void mem_write_2b_aligned(uint64_t addr, uint16_t data) {
@@ -347,7 +358,7 @@ static void mem_write_2b_aligned(uint64_t addr, uint16_t data) {
       return;
     }
   }
-  todo = true;
+  SET_TODO();
 }
 
 static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
@@ -360,7 +371,7 @@ static void mem_write_4b_aligned(uint64_t addr, uint32_t data) {
       return;
     }
   }
-  todo = true;
+  SET_TODO();
 }
 
 static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
@@ -373,7 +384,7 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
       return;
     }
   }
-  todo = true;
+  SET_TODO();
 }
 
 #define DBG_FETCH 0
@@ -416,7 +427,7 @@ static uint32_t fetch_insn(uint64_t addr) {
     }
   }
   fprintf(stderr, "Instruction fetch failed for address %lx\n", addr);
-  todo = true;
+  SET_TODO();
   return 0;
 }
 
@@ -432,7 +443,7 @@ uint64_t get_csr_next_value(uint64_t old, uint64_t next, uint8_t op_type) {
     // csrrc:
     return old & ~next;
   default:
-    todo = true;
+    SET_TODO();
     return -1;
   }
 }
@@ -485,7 +496,7 @@ void step() {
 
         if (cimm64 == 0) {
           // reserved, possibly the all-zeros instruction
-          todo = true;
+          SET_TODO();
         }
         break;
 
@@ -523,7 +534,7 @@ void step() {
         cimm64 = cimm5_lsd_zext64;
         break;
       default:
-        todo = true;
+        SET_TODO();
       }
     } else if (quad == 1) {
       // Quadrant 1
@@ -577,7 +588,7 @@ void step() {
           }
         } else {
           // reserved
-          todo = true;
+          SET_TODO();
         }
         break;
       case 0b100: {
@@ -635,7 +646,7 @@ void step() {
             funct7 = 0b0000000;
             break;
           default:
-            todo = true;
+            SET_TODO();
           }
         }
         break;
@@ -667,7 +678,7 @@ void step() {
 
         break;
       default:
-        todo = true;
+        SET_TODO();
       }
     } else if (quad == 2) {
       // Quadrant 2
@@ -684,7 +695,7 @@ void step() {
       case 0b010:
         if (crds1 == 0) {
           // reserved
-          todo = true;
+          SET_TODO();
         } else {
           // c.lwsp, expands to lw rd, offset(x2)
           opc = 0b00000;
@@ -698,7 +709,7 @@ void step() {
       case 0b011:
         if (crds1 == 0) {
           // reserved
-          todo = true;
+          SET_TODO();
         } else {
           // c.ldsp, expands to ld rd, offset(x2)
           opc = 0b00000;
@@ -717,7 +728,7 @@ void step() {
             // TODO: jalr, ebreak
             if (crds1 == 0) {
               // TODO: ebreak
-              todo = true;
+              SET_TODO();
             } else {
               // c.jalr, expands to jalr x1, 0(rs1)
               // default cimm64 value is zero, so no need to set immediate
@@ -739,7 +750,7 @@ void step() {
           if (crs2 == 0) {
             if (crds1 == 0) {
               // TODO: this is reserved
-              todo = true;
+              SET_TODO();
             } else {
               // c.jr, expands to jalr x0, 0(rs1)
               // default cimm64 value is zero, so no need to set immediate
@@ -777,7 +788,7 @@ void step() {
         cimm64 = ((op & 0x1c00) >> 7) | ((op & 0x380) >> 1);
         break;
       default:
-        todo = true;
+        SET_TODO();
       }
     }
   } else {
@@ -833,7 +844,7 @@ void step() {
     do_load = true;
     if (funct3 == 0b111) {
       // invalid instruction
-      todo = true;
+      SET_TODO();
     }
     addr = src1 + imm12_i_sext64;
     break;
@@ -847,7 +858,7 @@ void step() {
       // fence.i
       rd = 0;
     } else {
-      todo = true;
+      SET_TODO();
     }
     break;
 
@@ -862,7 +873,7 @@ void step() {
       // slli
       if (imm12_i_sext64 & 0xfc0) {
         // reserved
-        todo = true;
+        SET_TODO();
       }
       result = src1 << shift_amount_64bit;
       break;
@@ -882,7 +893,7 @@ void step() {
       // srli, srai
       if (imm12_i_sext64 & 0xbc0) {
         // reserved
-        todo = true;
+        SET_TODO();
       }
       bool is_arith = imm12_i_sext64 & 0x400;
       result = is_arith ? (int64_t)src1 >> shift_amount_64bit
@@ -898,7 +909,7 @@ void step() {
       result = src1 & imm12_i_sext64;
       break;
     default:
-      todo = true;
+      SET_TODO();
     }
     break;
   }
@@ -922,7 +933,7 @@ void step() {
       // slliw
       if (imm12_i_sext64 & 0xfe0) {
         // reserved
-        todo = true;
+        SET_TODO();
       }
       result = (int32_t)((uint32_t)src1 << shift_amount_32bit);
       break;
@@ -930,7 +941,7 @@ void step() {
       // srliw, sraiw
       if (imm12_i_sext64 & 0xbe0) {
         // reserved
-        todo = true;
+        SET_TODO();
       }
       bool is_arith = imm12_i_sext64 & 0x400;
       result = (int32_t)(is_arith ? (int32_t)src1 >> shift_amount_32bit
@@ -939,7 +950,7 @@ void step() {
     }
 
     default:
-      todo = true;
+      SET_TODO();
     }
     break;
   }
@@ -950,7 +961,7 @@ void step() {
     do_store = true;
     if (funct3 & 4) {
       // invalid instruction
-      todo = true;
+      SET_TODO();
     }
     addr = src1 + imm12_s_sext64;
     break;
@@ -960,68 +971,135 @@ void step() {
     if (funct3 == 0b010) {
       amo = true;
     } else {
-      todo = true;
+      SET_TODO();
     }
     break;
 
   case 0b01100: {
-    if (funct7 & 0b1011111) {
-      todo = true;
+    if (funct7 & 0b1011110) {
+      SET_TODO();
       break;
     }
 
-    bool is_alt_func = funct7 == 0b0100000;
-    switch (funct3) {
-    case 0b000:
-      // add
-      // sub
-      result = is_alt_func ? src1 - src2 : src1 + src2;
-      break;
-    case 0b001:
-      if (is_alt_func)
-        todo = true;
-      // sll
-      result = src1 << (src2 & 0x3f);
-      break;
-    case 0b010:
-      if (is_alt_func)
-        todo = true;
-      // slt
-      result = (int64_t)src1 < (int64_t)src2 ? 1 : 0;
-      break;
-    case 0b011:
-      if (is_alt_func)
-        todo = true;
-      // sltu
-      result = src1 < src2 ? 1 : 0;
-      break;
-    case 0b100:
-      if (is_alt_func)
-        todo = true;
-      // xor
-      result = src1 ^ src2;
-      break;
-    case 0b101: {
-      // srl, sra
-      uint8_t shift_amount = src2 & 0x3f;
-      result =
-          is_alt_func ? (int64_t)src1 >> shift_amount : src1 >> shift_amount;
-      break;
-    }
-    case 0b110:
-      if (is_alt_func)
-        todo = true;
-      // or
-      result = src1 | src2;
-      break;
-    case 0b111:
-      if (is_alt_func)
-        todo = true;
-      // and
-      result = src1 & src2;
-      break;
-    default:
-      todo = true;
+    if (funct7 & 1) {
+      // M extension 64-bit instructions
+      if (funct7 != 1) {
+        SET_TODO();
+        break;
+      }
+
+      switch (funct3) {
+      case 0b000:
+        // mul
+        result = src1 * src2;
+        break;
+      case 0b001:
+        // mulh
+        result = ((u128)(s128)(int64_t)src1 * (u128)(s128)(int64_t)src2) >> 64;
+        break;
+      case 0b010:
+        // mulhsu
+        result = ((u128)(s128)(int64_t)src1 * (u128)src2) >> 64;
+        break;
+      case 0b011:
+        // mulhu
+        result = ((u128)src1 * (u128)src2) >> 64;
+        break;
+      case 0b100:
+        // div
+
+        // for signed division, c++ guarantees rounding towards zero,
+        // but both division by zero and signed_min / -1 are UB
+        if (src2 == 0) {
+          result = ~0ul;
+        } else if (src2 == ~0ul) {
+          result = (~src1) + 1;
+        } else {
+          result = (int64_t)src1 / (int64_t)src2;
+        }
+        break;
+      case 0b101:
+        // divu
+        if (src2 == 0) {
+          result = ~0ul;
+        } else {
+          result = src1 / src2;
+        }
+        break;
+      case 0b110:
+        // rem
+
+        // in non-overflow cases, c++ guarantees the same semantics for `%` as
+        // RISC-V
+        if (src2 == 0) {
+          result = src1;
+        } else if (src2 == ~0ul) {
+          result = 0;
+        } else {
+          result = (int64_t)src1 % (int64_t)src2;
+        }
+        break;
+      case 0b111:
+        // remu
+        if (src2 == 0) {
+          result = src1;
+        } else {
+          result = src1 % src2;
+        }
+        break;
+      }
+    } else {
+      bool is_alt_func = funct7 == 0b0100000;
+      switch (funct3) {
+      case 0b000:
+        // add
+        // sub
+        result = is_alt_func ? src1 - src2 : src1 + src2;
+        break;
+      case 0b001:
+        if (is_alt_func)
+          SET_TODO();
+        // sll
+        result = src1 << (src2 & 0x3f);
+        break;
+      case 0b010:
+        if (is_alt_func)
+          SET_TODO();
+        // slt
+        result = (int64_t)src1 < (int64_t)src2 ? 1 : 0;
+        break;
+      case 0b011:
+        if (is_alt_func)
+          SET_TODO();
+        // sltu
+        result = src1 < src2 ? 1 : 0;
+        break;
+      case 0b100:
+        if (is_alt_func)
+          SET_TODO();
+        // xor
+        result = src1 ^ src2;
+        break;
+      case 0b101: {
+        // srl, sra
+        uint8_t shift_amount = src2 & 0x3f;
+        result =
+            is_alt_func ? (int64_t)src1 >> shift_amount : src1 >> shift_amount;
+        break;
+      }
+      case 0b110:
+        if (is_alt_func)
+          SET_TODO();
+        // or
+        result = src1 | src2;
+        break;
+      case 0b111:
+        if (is_alt_func)
+          SET_TODO();
+        // and
+        result = src1 & src2;
+        break;
+      }
     }
     break;
   }
@@ -1032,34 +1110,93 @@ void step() {
     break;
 
   case 0b01110: {
-    if (funct7 & 0b1011111) {
-      todo = true;
+    if (funct7 & 0b1011110) {
+      SET_TODO();
       break;
     }
 
-    bool is_alt_func = funct7 == 0b0100000;
-    switch (funct3) {
-    case 0b000:
-      // addw
-      // subw
-      result = (int32_t)(is_alt_func ? src1 - src2 : src1 + src2);
-      break;
-    case 0b001:
-      if (is_alt_func)
-        todo = true;
-      // sllw
-      result = (int32_t)((uint32_t)src1 << (src2 & 0x1f));
-      break;
-    case 0b101: {
-      // srlw, sraw
-      uint8_t shift_amount = src2 & 0x1f;
-      result = (int32_t)(is_alt_func ? (int32_t)src1 >> shift_amount
-                                     : (uint32_t)src1 >> shift_amount);
-      break;
+    uint32_t src1w = src1;
+    uint32_t src2w = src2;
+    uint32_t resultw = 0;
+
+    if (funct7 & 1) {
+      // M extension 32-bit instructions
+      if (funct7 != 1) {
+        SET_TODO();
+        break;
+      }
+
+      switch (funct3) {
+      case 0b000:
+        // mulw
+        resultw = src1w * src2w;
+        break;
+      case 0b100:
+        // divw
+        if (src2w == 0) {
+          resultw = ~0u;
+        } else if (src2w == ~0u) {
+          resultw = (~src1w) + 1;
+        } else {
+          resultw = (int32_t)src1w / (int32_t)src2w;
+        }
+        break;
+      case 0b101:
+        // divuw
+        if (src2w == 0) {
+          resultw = ~0u;
+        } else {
+          resultw = src1w / src2w;
+        }
+        break;
+      case 0b110:
+        // remw
+        if (src2w == 0) {
+          resultw = src1w;
+        } else if (src2w == ~0u) {
+          resultw = 0;
+        } else {
+          resultw = (int32_t)src1w % (int32_t)src2w;
+        }
+        break;
+      case 0b111:
+        // remuw
+        if (src2w == 0) {
+          resultw = src1w;
+        } else {
+          resultw = src1w % src2w;
+        }
+        break;
+      default:
+        SET_TODO();
+      }
+    } else {
+      bool is_alt_func = funct7 == 0b0100000;
+      switch (funct3) {
+      case 0b000:
+        // addw
+        // subw
+        resultw = is_alt_func ? src1w - src2w : src1w + src2w;
+        break;
+      case 0b001:
+        if (is_alt_func)
+          SET_TODO();
+        // sllw
+        resultw = (uint32_t)src1w << (src2w & 0x1f);
+        break;
+      case 0b101: {
+        // srlw, sraw
+        uint8_t shift_amount = src2w & 0x1f;
+        resultw = is_alt_func ? (int32_t)src1w >> shift_amount
+                              : (uint32_t)src1w >> shift_amount;
+        break;
+      }
+      default:
+        SET_TODO();
+      }
     }
-    default:
-      todo = true;
-    }
+    result = (int32_t)resultw;
+
     break;
   }
 
@@ -1093,7 +1230,7 @@ void step() {
       do_jump = src1 >= src2;
       break;
     default:
-      todo = true;
+      SET_TODO();
     }
     break;
 
@@ -1104,7 +1241,7 @@ void step() {
       jump_pc = (src1 + imm12_i_sext64) & -0x2;
       result = next_pc;
     } else {
-      todo = true;
+      SET_TODO();
     }
     break;
 
@@ -1118,7 +1255,7 @@ void step() {
   case 0b11100:
     if ((funct3 & 0b11) == 0) {
       // TODO: ecall, etc.
-      todo = true;
+      SET_TODO();
     } else {
       // CSR manipulation instructions
       uint8_t op_type = funct3 & 0b11;
@@ -1131,7 +1268,7 @@ void step() {
 
       bool writeable = (imm12_i_raw >> 10) != 0b11;
       if (!writeable && do_csr_write) {
-        todo = true;
+        SET_TODO();
       } else {
         switch (imm12_i_raw) {
         case 0x305:
@@ -1141,7 +1278,7 @@ void step() {
             uint64_t next = get_csr_next_value(result, src_val, op_type);
             if (next & 2) {
               // reserved
-              todo = true;
+              SET_TODO();
             } else {
               hart.csr.mtvec = next;
             }
@@ -1159,13 +1296,13 @@ void step() {
           result = 0;
           break;
         default:
-          todo = true;
+          SET_TODO();
         }
       }
     }
     break;
   default:
-    todo = true;
+    SET_TODO();
   }
 
 #define DBG_PRINT 0
@@ -1189,6 +1326,7 @@ void step() {
     } else {
       sprintf(op_hex, "%08x", op);
     }
+    fprintf(stderr, "TODO: line %lu\n", todo_line);
     fprintf(stderr, "### pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
             n_retired);
 #if 1
@@ -1252,7 +1390,7 @@ void step() {
     uint64_t watch = 0xbfe00004;
     if ((addr & -0x8) == watch) {
       fprintf(stderr, "LOAD RESULT FOR %lx = %lx\n", addr, result);
-      todo = true;
+      SET_TODO();
     }
   } else if (do_store) {
     switch (funct3) {
@@ -1273,7 +1411,7 @@ void step() {
     uint64_t watch = 0xbfe00000;
     if ((addr & -0x8) == watch) {
       fprintf(stderr, "STORE DATA FOR %lx = %lx\n", addr, src2);
-      todo = true;
+SET_TODO();
     }
     */
   } else if (amo) {
@@ -1295,17 +1433,17 @@ void step() {
           after = result_32bit + src2;
           break;
         default:
-          todo = true;
+          SET_TODO();
         }
 
         mem_write_4b_aligned(src1, after);
         dbg_log_memory(DBG_EVENT_ATOMIC, src1, 4, after);
       } else {
         // TODO: error out on misaligned atomics
-        todo = true;
+        SET_TODO();
       }
     } else {
-      todo = true;
+      SET_TODO();
     }
   }
 
