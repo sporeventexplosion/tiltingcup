@@ -368,7 +368,7 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
   todo = true;
 }
 
-#define DBG_FETCH
+// #define DBG_FETCH
 
 #ifdef DBG_FETCH
 const static size_t dbg_fetch_log_size = 16;
@@ -1160,7 +1160,7 @@ void step() {
     todo = true;
   }
 
-#if 1
+#if 0
   {
     char op_hex[9];
     if (compressed) {
@@ -1173,11 +1173,11 @@ void step() {
   }
 #endif
 
-#define DBG_PRINT
+// #define DBG_PRINT
 #ifdef DBG_PRINT
   static bool print = false;
-  print |= pc == 0x8000ffc0;
-  todo |= pc == 0x8000ffc8;
+  print |= pc == 0x8000f94a;
+  todo |= pc == 0x8000f974;
   if (todo || print) {
     printf("do_store = %d\n", do_store);
 #else
@@ -1225,7 +1225,7 @@ void step() {
     case 0b00: {
       // lb, lbu
       uint8_t result_8b = mem_read_1b(addr);
-      result = do_zext ? result_8b : (int8_t)result_8b;
+      result = do_zext ? result_8b : (int64_t)(int8_t)result_8b;
       dbg_log_memory(DBG_EVENT_LOAD, addr, 1 | ((uint64_t)do_zext << 12),
                      result);
       break;
@@ -1233,7 +1233,7 @@ void step() {
     case 0b01: {
       // lh, lhu
       uint16_t result_16b = mem_read_2b_aligned(addr);
-      result = do_zext ? result_16b : (int16_t)result_16b;
+      result = do_zext ? result_16b : (int64_t)(int16_t)result_16b;
       dbg_log_memory(DBG_EVENT_LOAD, addr, 2 | ((uint64_t)do_zext << 12),
                      result);
       break;
@@ -1241,7 +1241,7 @@ void step() {
     case 0b10: {
       // lw, lwu
       uint32_t result_32b = mem_read_4b_aligned(addr);
-      result = do_zext ? result_32b : (int32_t)result_32b;
+      result = do_zext ? result_32b : (int64_t)(int32_t)result_32b;
       dbg_log_memory(DBG_EVENT_LOAD, addr, 4 | ((uint64_t)do_zext << 12),
                      result);
       break;
@@ -1252,13 +1252,11 @@ void step() {
       dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
     }
 
-    /*
     uint64_t watch = 0xbfe00004;
-    if ((addr & -0x4) == watch) {
+    if ((addr & -0x8) == watch) {
       fprintf(stderr, "LOAD RESULT FOR %lx = %lx\n", addr, result);
       todo = true;
     }
-    */
   } else if (do_store) {
     switch (funct3) {
     case 0b00:
