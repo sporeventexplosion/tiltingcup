@@ -106,7 +106,7 @@ enum {
 void dbg_log_branch(uint64_t from, uint64_t to) {
   if (from == dbg_last_jump_src && to == dbg_last_jump_dst) {
     dbg_last_jump_count++;
-    putchar('.');
+    // putchar('.');
   } else {
     bool first = dbg_last_jump_src & 1;
     if (!first) {
@@ -115,13 +115,13 @@ void dbg_log_branch(uint64_t from, uint64_t to) {
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_src;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_dst;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_count;
-      putchar('\n');
+      // putchar('\n');
     }
 
     dbg_last_jump_src = from;
     dbg_last_jump_dst = to;
     dbg_last_jump_count = 1;
-    printf("jump from %lx to %lx", from, to);
+    // printf("jump from %lx to %lx", from, to);
   }
 }
 
@@ -179,6 +179,24 @@ static void build_memory_map(uint64_t dram_size) {
   };
 }
 
+static void copy_to_physical_memory(const char *src, uint64_t start_addr,
+                                    uint64_t size) {
+  uint64_t end_addr = start_addr + size;
+  assert(end_addr > start_addr);
+
+  for (auto &entry : memory_map) {
+    if (entry.start <= start_addr && entry.start + entry.size > start_addr) {
+      // don't cross memory map entries
+      assert(entry.start + entry.size >= end_addr);
+
+      char *dst = (char *)entry.ptr + (start_addr - entry.start);
+      memcpy(dst, src, size);
+      return;
+    }
+  }
+  assert(false);
+}
+
 static void load_elf_to_physical_memory(const char *filepath) {
   int fd = open(filepath, O_RDONLY);
   assert(fd >= 0);
@@ -225,23 +243,8 @@ static void load_elf_to_physical_memory(const char *filepath) {
       continue;
     uint64_t file_seg_end = p_offset + p_filesz;
     assert(file_seg_end > p_offset && file_seg_end <= filelen);
-    uint64_t paddr_end = p_paddr + p_filesz;
-    assert(paddr_end > p_paddr);
 
-    bool loaded = false;
-    for (auto &entry : memory_map) {
-      if (entry.start <= p_paddr && entry.start + entry.size > p_paddr) {
-        // don't cross memory map entries
-        assert(entry.start + entry.size >= paddr_end);
-
-        char *dst = (char *)entry.ptr + (p_paddr - entry.start);
-        memcpy(dst, data + p_offset, p_filesz);
-        loaded = true;
-
-        break;
-      }
-    }
-    assert(loaded);
+    copy_to_physical_memory(data + p_offset, p_paddr, p_filesz);
   }
 }
 
@@ -777,7 +780,7 @@ void step() {
   uint64_t addr;
 
   bool do_jump = false;
-  uint64_t jump_pc;
+  uint64_t jump_pc = 1;
 
   bool amo = false;
 
@@ -1121,9 +1124,12 @@ void step() {
     todo = true;
   }
 
+  /*
   static bool print = false;
   print |= pc == 0x8000f486;
   if (todo || print) {
+  */
+  if (todo) {
     putchar('\n');
     fflush(stdout);
 
@@ -1142,8 +1148,9 @@ void step() {
     }
     dbg_print_events_hash(stderr);
     dbg_print_regfile_hash(stderr, &hart);
+
+    assert(false);
   }
-  assert(!todo);
 
   // memory
   if (do_load) {
@@ -1179,11 +1186,13 @@ void step() {
       dbg_log_memory(DBG_EVENT_LOAD, addr, 8, result);
     }
 
+    /*
     uint64_t watch = 0xbfe00004;
     if ((addr & -0x4) == watch) {
       fprintf(stderr, "LOAD RESULT FOR %lx = %lx\n", addr, result);
       todo = true;
     }
+    */
   } else if (do_store) {
     switch (funct3) {
     case 0b00:
@@ -1199,11 +1208,13 @@ void step() {
       mem_write_8b_aligned(addr, src2);
     }
     dbg_log_memory(DBG_EVENT_STORE, addr, 1 << funct3, src2);
+    /*
     uint64_t watch = 0xbfe00000;
     if ((addr & -0x8) == watch) {
       fprintf(stderr, "STORE DATA FOR %lx = %lx\n", addr, src2);
       todo = true;
     }
+    */
   } else if (amo) {
     // do the alu operation here
     // TODO: actually look at the acquire and release fields
@@ -1242,10 +1253,11 @@ void step() {
     hart.regfile[rd] = result;
   }
 
-  todo |= (rd == 10) && (result == -9);
+  // todo |= (rd == 10) && (result == -9);
 
   // update pc
   if (do_jump) {
+
     dbg_log_branch(pc, jump_pc);
   }
   hart.pc = do_jump ? jump_pc : next_pc;
