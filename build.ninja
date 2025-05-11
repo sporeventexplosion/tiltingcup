@@ -1,0 +1,24 @@
+# refer to https://ninja-build.org/build.ninja.html
+ninja_required_version = 1.3
+
+root = .
+builddir = build
+cxx = clang++
+cflags = -g -Og -Wall -Wextra -Wimplicit-fallthrough -Wuninitialized -pedantic -fdiagnostics-color=always
+ldflags = -L$builddir
+
+rule cxx
+  command = $cxx -MMD -MT $out -MF $out.d $cflags -c $in -o $out
+  description = CXX $out
+  depfile = $out.d
+  deps = gcc
+
+rule link
+  command = $cxx $ldflags -o $out $in $libs
+  description = LINK $out
+
+build $builddir/tcup.o: cxx $root/tcup.cc
+build tcup: link $builddir/tcup.o
+  libs = -lsodium
+
+default tcup
