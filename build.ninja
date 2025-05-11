@@ -7,6 +7,12 @@ cxx = clang++
 cflags = -g -Og -Wall -Wextra -Wimplicit-fallthrough -Wuninitialized -pedantic -fdiagnostics-color=always
 ldflags = -L$builddir
 
+rule dts2dtb
+  command = dtc -I dts -O dtb -o $out $in
+  description = DTS2DTB $out
+
+build virt-devicetree.dtb: dts2dtb virt-devicetree.dts
+
 rule cxx
   command = $cxx -MMD -MT $out -MF $out.d $cflags -c $in -o $out
   description = CXX $out
@@ -18,7 +24,7 @@ rule link
   description = LINK $out
 
 build $builddir/tcup.o: cxx $root/tcup.cc
-build tcup: link $builddir/tcup.o
+build tcup: link $builddir/tcup.o | virt-devicetree.dtb
   libs = -lsodium
 
 default tcup

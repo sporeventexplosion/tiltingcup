@@ -197,19 +197,25 @@ static void copy_to_physical_memory(const char *src, uint64_t start_addr,
   assert(false);
 }
 
-static void load_elf_to_physical_memory(const char *filepath) {
+static void *mmap_whole_file_ro(const char *filepath, uint64_t *filelen) {
   int fd = open(filepath, O_RDONLY);
   assert(fd >= 0);
 
   struct stat st;
   assert(fstat(fd, &st) != -1);
-  size_t filelen = st.st_size;
-  assert(filelen > 0);
+  *filelen = st.st_size;
+  assert(*filelen > 0);
 
-  char *data = (char *)mmap(nullptr, filelen, PROT_READ, MAP_PRIVATE, fd, 0);
+  char *data = (char *)mmap(nullptr, *filelen, PROT_READ, MAP_PRIVATE, fd, 0);
   assert(data != MAP_FAILED);
 
   close(fd);
+  return data;
+}
+
+static void load_elf_to_physical_memory(const char *filepath) {
+  uint64_t filelen;
+  char *data = (char *)mmap_whole_file_ro(filepath, &filelen);
 
   assert(filelen >= 64);
 
@@ -246,6 +252,20 @@ static void load_elf_to_physical_memory(const char *filepath) {
 
     copy_to_physical_memory(data + p_offset, p_paddr, p_filesz);
   }
+
+  munmap(data, filelen);
+}
+
+static void load_fdt_to_physical_memory(const char *filepath, uint64_t addr) {
+  uint64_t filelen;
+  char *data = (char *)mmap_whole_file_ro(filepath, &filelen);
+
+  assert(filelen >= 4);
+  uint32_t magic = *(uint32_t *)data;
+  assert(magic == 0xedfe0dd0);
+  copy_to_physical_memory(data, addr, filelen);
+
+  munmap(data, filelen);
 }
 
 static uint8_t mem_read_1b(uint64_t addr) {
@@ -348,8 +368,23 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
   todo = true;
 }
 
+#define DBG_FETCH
+
+#ifdef DBG_FETCH
+const static size_t dbg_fetch_log_size = 16;
+static uint64_t dbg_fetch_log[dbg_fetch_log_size];
+static uint64_t dbg_fetch_log_pos = 0;
+#endif
+
 static uint32_t fetch_insn(uint64_t addr) {
   assert(addr % 2 == 0);
+
+#ifdef DBG_FETCH
+  dbg_fetch_log[dbg_fetch_log_pos] = addr;
+  if (++dbg_fetch_log_pos == dbg_fetch_log_size)
+    dbg_fetch_log_pos = 0;
+#endif
+
   for (auto &entry : memory_map) {
     if (entry.start <= addr) {
       if (entry.start + entry.size > addr + 3) {
@@ -903,6 +938,7 @@ void step() {
 
   case 0b01000:
     // integer register stores: sb, sh, sw, sd
+    rd = 0;
     do_store = true;
     if (funct3 & 4) {
       // invalid instruction
@@ -1124,12 +1160,29 @@ void step() {
     todo = true;
   }
 
-  /*
+#if 1
+  {
+    char op_hex[9];
+    if (compressed) {
+      sprintf(op_hex, "%04x", (uint16_t)op);
+    } else {
+      sprintf(op_hex, "%08x", op);
+    }
+    fprintf(stderr, "### pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
+            n_retired);
+  }
+#endif
+
+#define DBG_PRINT
+#ifdef DBG_PRINT
   static bool print = false;
-  print |= pc == 0x8000f486;
+  print |= pc == 0x8000ffc0;
+  todo |= pc == 0x8000ffc8;
   if (todo || print) {
-  */
+    printf("do_store = %d\n", do_store);
+#else
   if (todo) {
+#endif
     putchar('\n');
     fflush(stdout);
 
@@ -1139,18 +1192,31 @@ void step() {
     } else {
       sprintf(op_hex, "%08x", op);
     }
-    fprintf(stderr, "TODO: pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
+    fprintf(stderr, "### pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
             n_retired);
-    fprintf(stderr, "Register state:\n");
+#if 1
+    fprintf(stderr, "Register state before commiting current instruction:\n");
     for (int i = 0; i < 32; i++) {
       uint64_t reg = hart.regfile[i];
       fprintf(stderr, "    %10s  0x%016lx  %ld\n", reg_names[i], reg, reg);
     }
+#endif
     dbg_print_events_hash(stderr);
     dbg_print_regfile_hash(stderr, &hart);
 
-    assert(false);
+#ifdef DBG_FETCH
+    if (todo) {
+      printf("==== last %lu fetches ====\n", dbg_fetch_log_size);
+      size_t log_pos = dbg_fetch_log_pos;
+      do {
+        printf("    %16lx\n", dbg_fetch_log[log_pos]);
+        if (++log_pos == dbg_fetch_log_size)
+          log_pos = 0;
+      } while (log_pos != dbg_fetch_log_pos);
+    }
+#endif
   }
+  assert(!todo);
 
   // memory
   if (do_load) {
@@ -1275,6 +1341,7 @@ int main() {
   build_memory_map(dram_size);
   load_elf_to_physical_memory(
       "/usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.elf");
+  load_fdt_to_physical_memory("virt-devicetree.dtb", fdt_addr);
 
   hart.pc = 0x1000;
   for (;;) {
