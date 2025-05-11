@@ -103,10 +103,14 @@ enum {
   DBG_EVENT_ATOMIC,
 };
 
+#define DBG_BR 0
+
 void dbg_log_branch(uint64_t from, uint64_t to) {
   if (from == dbg_last_jump_src && to == dbg_last_jump_dst) {
     dbg_last_jump_count++;
-    // putchar('.');
+#if DBG_BR
+    putchar('.');
+#endif
   } else {
     bool first = dbg_last_jump_src & 1;
     if (!first) {
@@ -115,13 +119,17 @@ void dbg_log_branch(uint64_t from, uint64_t to) {
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_src;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_dst;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_count;
-      // putchar('\n');
+#if DBG_BR
+      putchar('\n');
+#endif
     }
 
     dbg_last_jump_src = from;
     dbg_last_jump_dst = to;
     dbg_last_jump_count = 1;
-    // printf("jump from %lx to %lx", from, to);
+#if DBG_BR
+    printf("jump from %lx to %lx", from, to);
+#endif
   }
 }
 
@@ -368,9 +376,9 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
   todo = true;
 }
 
-// #define DBG_FETCH
+#define DBG_FETCH 0
 
-#ifdef DBG_FETCH
+#if DBG_FETCH
 const static size_t dbg_fetch_log_size = 16;
 static uint64_t dbg_fetch_log[dbg_fetch_log_size];
 static uint64_t dbg_fetch_log_pos = 0;
@@ -379,7 +387,7 @@ static uint64_t dbg_fetch_log_pos = 0;
 static uint32_t fetch_insn(uint64_t addr) {
   assert(addr % 2 == 0);
 
-#ifdef DBG_FETCH
+#if DBG_FETCH
   dbg_fetch_log[dbg_fetch_log_pos] = addr;
   if (++dbg_fetch_log_pos == dbg_fetch_log_size)
     dbg_fetch_log_pos = 0;
@@ -1160,24 +1168,13 @@ void step() {
     todo = true;
   }
 
-#if 0
-  {
-    char op_hex[9];
-    if (compressed) {
-      sprintf(op_hex, "%04x", (uint16_t)op);
-    } else {
-      sprintf(op_hex, "%08x", op);
-    }
-    fprintf(stderr, "### pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
-            n_retired);
-  }
-#endif
-
-// #define DBG_PRINT
-#ifdef DBG_PRINT
+#define DBG_PRINT 0
+#if DBG_PRINT
+  // 124642
+  uint64_t max = 60000;
   static bool print = false;
-  print |= pc == 0x8000f94a;
-  todo |= pc == 0x8000f974;
+  print |= n_retired == max - 6;
+  todo |= n_retired == max;
   if (todo || print) {
     printf("do_store = %d\n", do_store);
 #else
@@ -1204,7 +1201,7 @@ void step() {
     dbg_print_events_hash(stderr);
     dbg_print_regfile_hash(stderr, &hart);
 
-#ifdef DBG_FETCH
+#if DBG_FETCH
     if (todo) {
       printf("==== last %lu fetches ====\n", dbg_fetch_log_size);
       size_t log_pos = dbg_fetch_log_pos;
