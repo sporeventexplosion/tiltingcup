@@ -169,7 +169,7 @@ char *dram;
 
 static void build_memory_map(uint64_t dram_size) {
   assert(memory_map.empty());
-  dram = new char[dram_size];
+  dram = new char[dram_size]{};
   assert(dram);
   // NOTE: keep the start addresses aligned to at least 4 KB (sizes don't have
   // to be round)
