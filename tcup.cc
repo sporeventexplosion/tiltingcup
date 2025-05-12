@@ -17,8 +17,9 @@ typedef unsigned __int128 u128;
 static const uint64_t mip_mie_mask = 0x2aaa;
 
 struct Csr {
-  // mie: 0x304 machine rw; warl, only legal values are stored in this field
-  uint16_t mie;
+  // mie: 0x304, mip: 0x344 machine rw; warl, only legal values are stored in
+  // this field
+  uint16_t mie, mip;
   // mtvec: 0x305 machine rw
   uint64_t mtvec;
   // mscratch: 0x340 machine rw
@@ -1011,10 +1012,13 @@ void step() {
     break;
 
   case 0b01011:
-    // atomic ops
-    if (funct3 == 0b010) {
+    // lrsc and amo instructions
+    if ((funct3 & 0b110) == 0b010) {
+      // 32-bit and 64-bit
+      // TODO: should we handle lrsc in the same place as amo?
       amo = true;
     } else {
+      // TODO: 64-bit
       SET_TODO();
     }
     break;
@@ -1352,6 +1356,14 @@ void step() {
             hart.csr.mscratch = get_csr_next_value(result, src_val, op_type);
           }
           break;
+        case 0x344:
+          // mip: machine rw
+          result = (uint64_t)hart.csr.mip;
+          if (do_csr_write) {
+            hart.csr.mip =
+                get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+          }
+          break;
         case 0xf14:
           // mhartid: machine ro
           result = 0;
@@ -1490,33 +1502,78 @@ SET_TODO();
     */
   } else if (amo) {
     // do the alu operation here
-    // TODO: actually look at the acquire and release fields
+    // TODO: don't just ignore the acquire and release fields
     // TODO: handle sizes other than 32 bits
-    assert(funct3 == 0b010);
+    assert((funct3 & 0b110) == 0b010);
 
-    if ((funct7 & 0xc) == 0) {
-      if (src1 % 4 == 0) {
-        uint32_t result_32bit = mem_read_4b_aligned(src1);
-        result = (int32_t)result_32bit;
+    bool is_64bit = funct3 & 1;
+    uint8_t funct7_mid2 = (funct7 >> 2) & 0x3;
+    uint8_t funct7_high3 = funct7 >> 4;
+    switch ((funct7_mid2) >> 2) {
+    case 0b00:
+    case 0b01:
+      // amo
+      if (funct7_mid2 == 1 && funct7_high3 != 0)
+        SET_TODO();
+      if (is_64bit) {
+        if (src1 % 8 == 0) {
+          result = mem_read_8b_aligned(src1);
 
-        uint32_t after = 0;
-        uint8_t amofunct = funct7 >> 4;
-        switch (amofunct) {
-        case 0b000:
-          // amoadd
-          after = result_32bit + src2;
-          break;
-        default:
+          uint64_t after = 0;
+          if (funct7_mid2 == 0) {
+            // amo alu functions
+            switch (funct7_high3) {
+            case 0b000:
+              // amoadd
+              after = result + src2;
+              break;
+            default:
+              SET_TODO();
+            }
+          } else {
+            // amoswap
+            after = src2;
+          }
+
+          mem_write_8b_aligned(src1, after);
+          dbg_log_memory(DBG_EVENT_ATOMIC, src1, 8, after);
+        } else {
+          // TODO: error out on misaligned atomics
           SET_TODO();
         }
-
-        mem_write_4b_aligned(src1, after);
-        dbg_log_memory(DBG_EVENT_ATOMIC, src1, 4, after);
       } else {
-        // TODO: error out on misaligned atomics
-        SET_TODO();
+        if (src1 % 4 == 0) {
+          uint32_t result_32bit = mem_read_4b_aligned(src1);
+          result = (int32_t)result_32bit;
+
+          uint32_t after = 0;
+          if (funct7_mid2 == 0) {
+            // amo alu functions
+            switch (funct7_high3) {
+            case 0b000:
+              // amoadd
+              after = result_32bit + src2;
+              break;
+            default:
+              SET_TODO();
+            }
+          } else {
+            // amoswap
+            after = src2;
+          }
+
+          mem_write_4b_aligned(src1, after);
+          dbg_log_memory(DBG_EVENT_ATOMIC, src1, 4, after);
+        } else {
+          // TODO: error out on misaligned atomics
+          SET_TODO();
+        }
       }
-    } else {
+      break;
+
+      break;
+    default:
+      // TODO: lrsc
       SET_TODO();
     }
   }
