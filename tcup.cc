@@ -14,7 +14,11 @@
 typedef __int128 s128;
 typedef unsigned __int128 u128;
 
+static const uint64_t mip_mie_mask = 0x2aaa;
+
 struct Csr {
+  // mie: 0x304 machine rw; warl, only legal values are stored in this field
+  uint16_t mie;
   // mtvec: 0x305 machine rw
   uint64_t mtvec;
   // mscratch: 0x340 machine rw
@@ -40,8 +44,8 @@ uint64_t todo_line = ~0ul;
 
 static uint64_t n_retired = 0;
 
-const static size_t dbg_event_buf_cap = 4096;
-const static size_t dbg_max_event_len = 8;
+static const size_t dbg_event_buf_cap = 4096;
+static const size_t dbg_max_event_len = 8;
 static size_t dbg_event_buf_size = 0;
 static uint64_t *dbg_event_buf;
 static crypto_generichash_state dbg_event_hash_state;
@@ -116,6 +120,36 @@ enum {
 
 #define DBG_BR 0
 
+#if DBG_BR
+
+#include <unordered_set>
+#include <utility>
+
+static bool dbg_was_new_jump = false;
+
+struct dbg_branch_pair {
+  uint64_t from, to;
+  bool operator==(const dbg_branch_pair &rhs) const {
+    return from == rhs.from && to == rhs.to;
+  }
+};
+
+static uint64_t dbg_hash_u64(uint64_t x) {
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ul;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebul;
+  x = x ^ (x >> 31);
+  return x;
+}
+
+template <> struct std::hash<dbg_branch_pair> {
+  uint64_t operator()(const dbg_branch_pair &p) const {
+    return dbg_hash_u64(p.from) ^ (dbg_hash_u64(p.to) << 1);
+  }
+};
+
+std::unordered_set<dbg_branch_pair> dbg_seen_branches{};
+#endif
+
 void dbg_log_branch(uint64_t from, uint64_t to) {
   if (from == dbg_last_jump_src && to == dbg_last_jump_dst) {
     dbg_last_jump_count++;
@@ -130,16 +164,26 @@ void dbg_log_branch(uint64_t from, uint64_t to) {
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_src;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_dst;
       dbg_event_buf[dbg_event_buf_size++] = dbg_last_jump_count;
-#if DBG_BR
-      putchar('\n');
-#endif
     }
 
     dbg_last_jump_src = from;
     dbg_last_jump_dst = to;
     dbg_last_jump_count = 1;
+
 #if DBG_BR
-    printf("jump from %lx to %lx", from, to);
+    dbg_branch_pair bp{from, to};
+    // const char *is_new = "";
+
+    if (dbg_seen_branches.find(bp) == dbg_seen_branches.end()) {
+      // is_new = " (NEW)";
+      dbg_seen_branches.insert(dbg_branch_pair{from, to});
+      if (!dbg_was_new_jump)
+        putchar('\n');
+      printf("jump from %lx to %lx (new)\n", from, to);
+      dbg_was_new_jump = true;
+    } else {
+      putchar('!');
+    }
 #endif
   }
 }
@@ -390,7 +434,7 @@ static void mem_write_8b_aligned(uint64_t addr, uint64_t data) {
 #define DBG_FETCH 0
 
 #if DBG_FETCH
-const static size_t dbg_fetch_log_size = 16;
+static const size_t dbg_fetch_log_size = 16;
 static uint64_t dbg_fetch_log[dbg_fetch_log_size];
 static uint64_t dbg_fetch_log_pos = 0;
 #endif
@@ -1271,6 +1315,23 @@ void step() {
         SET_TODO();
       } else {
         switch (imm12_i_raw) {
+        case 0x301:
+          // misa: machine rw
+          if (do_csr_write)
+            SET_TODO();
+
+          // TODO: currently returns a default value copied from a running QEMU
+          // instance (RV64ACDFHIMSU)
+          result = 0x80000000001411adul;
+          break;
+        case 0x304:
+          // mie: machine rw
+          result = (uint64_t)hart.csr.mie;
+          if (do_csr_write) {
+            hart.csr.mie =
+                get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+          }
+          break;
         case 0x305:
           // mtvec: machine rw
           result = hart.csr.mtvec;
@@ -1307,11 +1368,13 @@ void step() {
 
 #define DBG_PRINT 0
 #if DBG_PRINT
-  // 124642
-  uint64_t max = 60000;
   static bool print = false;
-  print |= n_retired == max - 6;
-  todo |= n_retired == max;
+  static uint64_t countdown = -1;
+  if (pc == 0x800002f8 && dbg_was_new_jump)
+    countdown = 20;
+  countdown--;
+  print |= pc == 0x80000298;
+  todo |= countdown == 0;
   if (todo || print) {
     printf("do_store = %d\n", do_store);
 #else
@@ -1330,10 +1393,12 @@ void step() {
     fprintf(stderr, "### pc = %lx, op = %s, n_retired = %lu\n", pc, op_hex,
             n_retired);
 #if 1
-    fprintf(stderr, "Register state before commiting current instruction:\n");
-    for (int i = 0; i < 32; i++) {
-      uint64_t reg = hart.regfile[i];
-      fprintf(stderr, "    %10s  0x%016lx  %ld\n", reg_names[i], reg, reg);
+    if (todo) {
+      fprintf(stderr, "Register state before commiting current instruction:\n");
+      for (int i = 0; i < 32; i++) {
+        uint64_t reg = hart.regfile[i];
+        fprintf(stderr, "    %10s  0x%016lx  %ld\n", reg_names[i], reg, reg);
+      }
     }
 #endif
     dbg_print_events_hash(stderr);
@@ -1351,6 +1416,15 @@ void step() {
     }
 #endif
   }
+#if DBG_BR
+  if (dbg_was_new_jump) {
+    dbg_was_new_jump = false;
+    fprintf(stderr, "Register file hash after new jump (n_retired = %lu):\n",
+            n_retired);
+    dbg_print_regfile_hash(stderr, &hart);
+  }
+#endif
+
   assert(!todo);
 
   // memory
