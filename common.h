@@ -22,6 +22,10 @@ struct Csr {
   uint64_t mtvec;
   // mscratch: 0x340 machine rw
   uint64_t mscratch;
+  // pmpaddr0-pmpaddr63: 0x3b0-0x3ef machine rw
+  uint64_t pmpaddrs[64];
+  // mhpmcounter3-mhpmcounter31: 0xb03-0xb1f machine rw (first 3 entries unused)
+  uint64_t mhpmcounters[32];
 };
 
 struct Hart {

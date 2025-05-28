@@ -9,7 +9,8 @@ std::vector<MemoryMapEntry> memory_map = {};
 char *dram = nullptr;
 Hart hart = {};
 
-static const uint64_t mip_mie_mask = 0x2aaa;
+const uint64_t mip_mie_mask = 0x2aaa;
+const uint64_t pmp_addr_mask = 0x3fffffffffffff;
 
 bool todo = false;
 uint64_t todo_line = ~0ul;
@@ -1169,58 +1170,119 @@ void step() {
       if (!writeable && do_csr_write) {
         SET_TODO();
       } else {
-        switch (imm12_i_raw) {
-        case 0x301:
-          // misa: machine rw
-          if (do_csr_write)
+        if ((imm12_i_raw & 0xff0) == 0x3a0) {
+          // PMP config registers: machine rw, odd-numbered ones don't exist on
+          // RV64
+          if (imm12_i_raw & 1)
             SET_TODO();
 
-          // TODO: currently returns a default value copied from a running QEMU
-          // instance (RV64ACDFHIMSU)
-          result = 0x80000000001411adul;
-          break;
-        case 0x304:
-          // mie: machine rw
-          result = (uint64_t)hart.csr.mie;
-          if (do_csr_write) {
-            hart.csr.mie =
-                get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
-          }
-          break;
-        case 0x305:
-          // mtvec: machine rw
-          result = hart.csr.mtvec;
-          if (do_csr_write) {
-            uint64_t next = get_csr_next_value(result, src_val, op_type);
-            if (next & 2) {
-              // reserved
-              SET_TODO();
-            } else {
-              hart.csr.mtvec = next;
-            }
-          }
-          break;
-        case 0x340:
-          // mscratch: machine rw
-          result = hart.csr.mscratch;
-          if (do_csr_write) {
-            hart.csr.mscratch = get_csr_next_value(result, src_val, op_type);
-          }
-          break;
-        case 0x344:
-          // mip: machine rw
-          result = (uint64_t)hart.csr.mip;
-          if (do_csr_write) {
-            hart.csr.mip =
-                get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
-          }
-          break;
-        case 0xf14:
-          // mhartid: machine ro
           result = 0;
-          break;
-        default:
-          SET_TODO();
+          if (do_csr_write) {
+            uint64_t next_value =
+                get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+            // TODO: allow setting the registers to nonzero values
+            if (next_value != 0)
+              SET_TODO();
+          }
+        } else if (imm12_i_raw >= 0x3b0 && imm12_i_raw <= 0x3ef) {
+          // PMP address registers: machine rw
+          uint8_t pmp_addr_idx = imm12_i_raw - 0x3b0;
+          result = hart.csr.pmpaddrs[pmp_addr_idx];
+          if (do_csr_write) {
+            hart.csr.pmpaddrs[pmp_addr_idx] =
+                get_csr_next_value(result, src_val, op_type) & pmp_addr_mask;
+          }
+        } else if (imm12_i_raw >= 0xb03 && imm12_i_raw <= 0xb1f) {
+          // machine performance-monitoring counters: machine rw
+          uint8_t counter_idx = imm12_i_raw - 0xb00;
+          result = hart.csr.mhpmcounters[counter_idx];
+          if (do_csr_write) {
+            hart.csr.mhpmcounters[counter_idx] =
+                get_csr_next_value(result, src_val, op_type);
+          }
+        } else {
+          switch (imm12_i_raw) {
+          case 0x301:
+            // misa: machine rw
+            if (do_csr_write)
+              SET_TODO();
+
+            // TODO: currently returns a default value copied from a running
+            // QEMU instance (RV64ACDFHIMSU)
+            result = 0x80000000001411adul;
+            break;
+          case 0x304:
+            // mie: machine rw
+            result = (uint64_t)hart.csr.mie;
+            if (do_csr_write) {
+              hart.csr.mie =
+                  get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+            }
+            break;
+          case 0x305:
+            // mtvec: machine rw
+            result = hart.csr.mtvec;
+            if (do_csr_write) {
+              uint64_t next = get_csr_next_value(result, src_val, op_type);
+              if (next & 2) {
+                // reserved
+                SET_TODO();
+              } else {
+                hart.csr.mtvec = next;
+              }
+            }
+            break;
+          case 0x306:
+            // mcounteren: machine rw
+            // TODO: implement
+            result = 0;
+            if (do_csr_write) {
+              uint64_t next =
+                  get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+              if (next != 0)
+                SET_TODO();
+            }
+            break;
+          case 0x30a:
+            // menvcfg: machine rw
+            // currently hardcodes ADUE bit as enabled; all other bits are zero
+            // ADUE enables automatic hardware updating of access/dirty flags of
+            // page table entries
+            // TODO: implement
+            result = 0x2000000000000000;
+            if (do_csr_write)
+              SET_TODO();
+            break;
+          case 0x320:
+            // mcountinhibit: machine rw
+            // TODO: implement
+            result = 0;
+            if (do_csr_write) {
+              SET_TODO();
+            }
+            break;
+          case 0x340:
+            // mscratch: machine rw
+            result = hart.csr.mscratch;
+            if (do_csr_write) {
+              hart.csr.mscratch = get_csr_next_value(result, src_val, op_type);
+            }
+            break;
+          case 0x344:
+            // mip: machine rw
+            result = (uint64_t)hart.csr.mip;
+            if (do_csr_write) {
+              hart.csr.mip =
+                  get_csr_next_value(result, src_val, op_type) & mip_mie_mask;
+            }
+            break;
+          case 0xf14:
+            // mhartid: machine ro
+            result = 0;
+            break;
+          default:
+            SET_TODO();
+          }
         }
       }
     }
